@@ -1,0 +1,779 @@
+
+`ifndef BISCUIT_SCALAR_DPATH_V
+`define BISCUIT_SCALAR_DPATH_V
+<%
+from pyhplib import *
+import math
+%>
+
+module biscuit_ScalarDpath
+(
+
+  input         clk,
+  input         reset,
+
+  // Register File Interface with Mem
+  input         rfreq_val_Fhl,
+  output        rfreq_rdy_Fhl,
+  output        rfresp_val_Rhl,
+  input         rfresp_rdy_Rhl,
+
+  input         rd_en0,
+  input [4:0]   rs1_addr_Fhl,
+  input         rd_en1,
+  input [4:0]   rs2_addr_Fhl,
+  input         wen_Xhl,
+  input         wb_access_dir_Xhl,
+  input [4:0]   waddr_Xhl,
+
+  input [4:0]   rs1_Dhl,
+  input [4:0]   rs2_Dhl,
+  input [4:0]   rs1_Xhl,
+  input [1:0]   rega_arch_reg_Dhl,
+  input [1:0]   regb_arch_reg_Dhl,
+
+  input                 sp_subword_incr_Xhl,
+  input                 scalar_ld_resp_val,
+<%
+print('  input [' + str(int(BISCUIT_P_NBITS-1)) + ':0] scalar_ld_resp_data,')
+%>
+  input                 wb_to_addr_Xhl,
+  input                 wb_to_data_Xhl,
+  input                 csr_read_en_Xhl,
+  input [31:0]          csr_read_data_Xhl,
+
+  input [31:0]          ir_Fhl,
+  input [31:0]          ir_Xhl,
+  // ALU Inputs
+  input                 shamt_reg_en_Xhl,
+  input                 shamt_mux_sel_Xhl,
+  input                 adj_sw_mux_sel_Xhl,
+  input                 adj_sw_reg_en_Xhl,
+  input                 a_offset_mux_sel_Dhl,
+  input                 a_offset_mux_sel_Xhl,
+  input [4:0]           shamt_imm_Xhl,
+  input                 shift_inst_dir_Xhl,
+  input                 a_rd_tmp_Xhl,
+
+  // Scalar -> SIMD Shift signals
+  output reg           signed_off_msb_Xhl,
+<%
+if BISCUIT_P_NBITS == 1:
+  print("  output reg bitwise_shamt_Xhl, // dummy for bit-serial")
+else:
+  print("  output reg ["+str(BISCUIT_C_LOG_NBITS-1)+":0] bitwise_shamt_Xhl,")
+%>
+
+  input                 a_mux_sel_Xhl,
+<%
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]   pc_plus4_mux_out_Xhl,')
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]   b_imm_Xhl,')
+%>
+  input                 b_mux_sel_Xhl,
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] a_subword_off_Dhl,')
+print('  output ['+str(BISCUIT_C_OFFBITS-1)+':0] a_subword_idx_Dhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] b_subword_off_Dhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] wb_subword_off_Xhl,')
+%>
+  input       addsub_fn_Xhl,
+  input [1:0] logic_fn_Xhl,
+  input [2:0] alu_fn_type_Xhl,
+
+  input         prop_flag_Xhl,
+  input         carry_in_1_Xhl,
+  input         last_uop_Xhl,
+  input         flag_reg_en_Xhl,
+  input         br_reg_en_Xhl,
+  input [2:0]   br_type_Xhl,
+
+  // Output RS1 to SIMD lanes
+<%
+print('  output ['+str(BISCUIT_P_NBITS-1)+':0]   rf_out_rs1_Xhl,')
+%>
+
+  // Memory interface
+  output [31:0] dmemreq_msg_addr_Xhl,
+  output [31:0] dmemreq_msg_data_Xhl,
+  input  [1:0]  dmemreq_msg_len_Xhl,
+  input         dmemreq_signed_Xhl,
+  input         dmemresp_val_Xhl,
+  input  [31:0] dmemresp_msg_data_Xhl,
+
+  // Outputs to PC logic
+  output reg    b_use_imm_reg_Xhl,
+  output reg    branch_taken_Xhl,
+<%
+print('  output reg ['+str(BISCUIT_P_NBITS-1)+':0] alu_mux_out_Xhl,   // For use in addr_reg and proc2_cop')
+%>
+
+  input vl_reg_en_Xhl,
+  output reg [31:0] avl_reg_Xhl,
+  output reg [31:0] vl_reg_Xhl
+
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_P_NLANES = '+str(BISCUIT_P_NLANES) + ';')
+print('  localparam BISCUIT_C_NLANES_NBITS = '+str(int(math.ceil(math.log(BISCUIT_P_NLANES,2)))) + ';')
+print('  localparam BISCUIT_C_LOG_NBITS = '+str(BISCUIT_C_LOG_NBITS) + ';')
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS) + ';')
+%>
+
+  //-------------------------
+  // Register Read Stage (R)
+  //-------------------------
+  // // Declarations
+  // wire [BISCUIT_P_NBITS-1:0] a_data_Xhl;
+  // wire [BISCUIT_P_NBITS-1:0] b_data_Xhl;
+  // // wire [BISCUIT_C_OFFBITS-1:0] a_subword_idx_Rhl;
+
+  // // Regfile
+  // wire ce_a_Rhl = rega_addr_Rhl != {BISCUIT_P_NBITS{1'b0}}; // Active high
+  // wire ce_b_Rhl = regb_addr_Rhl != {BISCUIT_P_NBITS{1'b0}}; // Active high
+
+  // wire [BISCUIT_P_NBITS-1:0] bw_Xhl = {BISCUIT_P_NBITS{wb_en_Xhl}}; // Active high
+
+  wire [BISCUIT_P_NBITS-1:0] alu_ld_mux_out_Xhl = scalar_ld_resp_val ? scalar_ld_resp_data : alu_mux_out_Xhl;
+
+  wire [31:0] deserial_reg_wdata_Xhl;
+  biscuit_DeserializedReg output_holding_reg
+  (
+    .reset           (reset),
+    .clk             (clk),
+    .subword_en_idx  (wb_subword_off_Xhl),
+    .data_in         (alu_ld_mux_out_Xhl),
+
+    .out             (deserial_reg_wdata_Xhl)
+  );
+
+  // least to most significant -> dir = 0. 
+  wire [31:0] scalar_rf_wdata_Xhl = wb_access_dir_Xhl ? {deserial_reg_wdata_Xhl[31:BISCUIT_P_NBITS], alu_ld_mux_out_Xhl} : {alu_ld_mux_out_Xhl, deserial_reg_wdata_Xhl[31-BISCUIT_P_NBITS:0]};
+
+  // biscuit_scalar_rf rfile
+  // (
+  //   .MEMCLK  (clk),
+  //   .RESET_N (~reset),
+  //   .CEA     (ce_a_Rhl),
+  //   .CEB     (ce_b_Rhl),
+  //   .CEW     (wb_en_Xhl),
+  //   .AA      ({rega_addr_Rhl, a_subword_idx_Rhl}),
+  //   .AB      ({regb_addr_Rhl, b_subword_off_Dhl}),
+  //   .AW      ({wb_addr_Xhl, wb_subword_off_Xhl}),
+  //   .DIN     (alu_ld_mux_out_Xhl),
+  //   .BW      (bw_Xhl),
+  //   .DOUTA   (rf_out_a_Xhl),
+  //   .DOUTB   (rf_out_b_Xhl)
+  // );
+
+  // biscuit_CoreDpathRegfile rfile
+  // (
+  //   .clk         (clk),
+  //   .raddr0_Rhl  (rega_addr_Rhl),
+  //   .roff0_Rhl   (a_subword_idx_Rhl),
+  //   .rdata0_Xhl  (rf_out_a_Xhl),
+  //   .raddr1_Rhl  (regb_addr_Rhl),
+  //   .roff1_Rhl   (b_subword_off_Dhl),
+  //   .rdata1_Xhl  (rf_out_b_Xhl),
+  //   .wen_Xhl     (wb_en_Xhl),
+  //   .waddr_Xhl   (wb_addr_Xhl),
+  //   .woffset_Xhl (wb_subword_off_Xhl),
+  //   .wdata_Xhl   (alu_ld_mux_out_Xhl)
+  // );
+
+wire [31:0] rfresp_rs1_data_Rhl;
+wire [31:0] rfresp_rs2_data_Rhl;
+// Only read RS1 on VX instructions
+// This way both RF and VRF perform one read
+wire v_use_scalar_rs1_Fhl = ((ir_Fhl[6:0]==7'b1010111) && (ir_Fhl[14:12]==3'b100)); 
+biscuit_SerializedRegfile
+#(1)
+rfile
+(
+  .clk                (clk),
+  .reset              (reset),
+
+  .rfreq_val          (rfreq_val_Fhl),
+  .rfreq_rdy          (rfreq_rdy_Fhl),
+  .rfresp_val         (rfresp_val_Rhl),
+  .rfresp_rdy         (rfresp_rdy_Rhl),
+
+  .rd_en0             (rd_en0),
+  .raddr0             (rs1_addr_Fhl),
+  .rd_en1             (rd_en1 && !v_use_scalar_rs1_Fhl),
+  .raddr1             (rs2_addr_Fhl),
+
+  .wen                (wen_Xhl),
+  .waddr              (waddr_Xhl),
+  .wdata              (scalar_rf_wdata_Xhl),
+
+  .rdata0             (rfresp_rs1_data_Rhl),
+  .rdata1             (rfresp_rs2_data_Rhl)
+);
+
+
+  //-------------------
+  // Decode Stage (D)
+  //-------------------
+
+  // Holding registers for RS1 and RS2 that have been read
+
+  reg [31:0] rs1_word_stored_Dhl;
+  reg [31:0] rs2_word_stored_Dhl;
+
+  always @ (posedge clk) begin
+    if (reset) begin
+      rs1_word_stored_Dhl <= 32'b0;
+    end else if (wen_Xhl && (rs1_Dhl == waddr_Xhl)) begin // bypassing takes priority
+      rs1_word_stored_Dhl <= scalar_rf_wdata_Xhl;
+    end else if (rfresp_val_Rhl && rfresp_rdy_Rhl) begin // rdy won't be high on write to RF.
+      rs1_word_stored_Dhl <= rfresp_rs1_data_Rhl;
+    end else begin
+      rs1_word_stored_Dhl <= rs1_word_stored_Dhl;
+    end
+  end
+
+  always @ (posedge clk) begin
+    if (reset) begin
+      rs2_word_stored_Dhl <= 32'b0;
+    end else if (wen_Xhl && (rs2_Dhl == waddr_Xhl)) begin // implement bypassing
+      rs2_word_stored_Dhl <= scalar_rf_wdata_Xhl;
+    end else if (rfresp_val_Rhl && rfresp_rdy_Rhl) begin
+      rs2_word_stored_Dhl <= rfresp_rs2_data_Rhl;
+    end else begin
+      rs2_word_stored_Dhl <= rs2_word_stored_Dhl;
+    end
+  end
+
+  wire [31:0] rs1_word_Dhl = (wen_Xhl && (rs1_Dhl == waddr_Xhl)) ? scalar_rf_wdata_Xhl : rs1_word_stored_Dhl;
+  wire [31:0] rs2_word_Dhl = (wen_Xhl && (rs2_Dhl == waddr_Xhl)) ? scalar_rf_wdata_Xhl : rs2_word_stored_Dhl;
+
+  // Mux holding registers to feed to X stage
+
+  localparam REG_RS1 = 2'b00;
+  localparam REG_RS2 = 2'b01;
+  localparam REG_RD  = 2'b10;
+  localparam REG_R0  = 2'b11;
+
+  // reg [BISCUIT_P_NBITS-1:0] a_data_Dhl;
+  // reg [BISCUIT_P_NBITS-1:0] b_data_Dhl;
+
+  // always @ (*) begin
+  //   a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   case (rega_arch_reg_Dhl)
+  //     REG_RS1: a_data_Dhl = rs1_word_Dhl[a_subword_idx_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: a_data_Dhl = rs2_word_Dhl[a_subword_idx_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  a_data_Dhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+
+  //   case (regb_arch_reg_Dhl)
+  //     REG_RS1: b_data_Dhl = rs1_word_Dhl[b_subword_off_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: b_data_Dhl = rs2_word_Dhl[b_subword_off_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  b_data_Dhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+  // end
+
+  //-------------------
+  // Execute Stage (X)
+  //-------------------
+  // Pipelining to cut critical path.
+  reg[4:0] rega_arch_reg_Xhl;
+  reg[4:0] regb_arch_reg_Xhl;
+  reg [BISCUIT_C_OFFBITS-1:0] a_subword_idx_Xhl;
+  reg [BISCUIT_C_OFFBITS-1:0] b_subword_off_Xhl;
+  reg [31:0] rs1_word_Xhl;
+  reg [31:0] rs2_word_Xhl;
+  always @(posedge clk) begin
+    if (reset) begin
+      rega_arch_reg_Xhl <= 5'b0;
+      regb_arch_reg_Xhl <= 5'b0;
+      a_subword_idx_Xhl <= {BISCUIT_C_OFFBITS{1'b0}};
+      b_subword_off_Xhl <= {BISCUIT_C_OFFBITS{1'b0}};
+      rs1_word_Xhl <= 32'b0;
+      rs2_word_Xhl <= 32'b0;
+    end else begin
+      rega_arch_reg_Xhl <= rega_arch_reg_Dhl;
+      regb_arch_reg_Xhl <= regb_arch_reg_Dhl;
+      a_subword_idx_Xhl <= a_subword_idx_Dhl;
+      b_subword_off_Xhl <= b_subword_off_Dhl;
+      rs1_word_Xhl <= rs1_word_Dhl;
+      rs2_word_Xhl <= rs2_word_Dhl;
+    end
+  end
+
+  reg [BISCUIT_P_NBITS-1:0] a_data_Xhl;
+  reg [BISCUIT_P_NBITS-1:0] b_data_Xhl;
+  always @ (*) begin
+    a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+    b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+    case (rega_arch_reg_Xhl)
+      REG_RS1: a_data_Xhl = rs1_word_Xhl[a_subword_idx_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+      REG_RS2: a_data_Xhl = rs2_word_Xhl[a_subword_idx_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+      REG_RD:  a_data_Xhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+      REG_R0:  a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+      default: a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+    endcase
+
+    case (regb_arch_reg_Xhl)
+      REG_RS1: b_data_Xhl = rs1_word_Xhl[b_subword_off_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+      REG_RS2: b_data_Xhl = rs2_word_Xhl[b_subword_off_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+      REG_RD:  b_data_Xhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+      REG_R0:  b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+      default: b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+    endcase
+  end
+
+
+
+
+  reg [31:0]                mem_data_reg_Xhl;
+  reg [31:0]                csr_holding_reg_Xhl;
+
+  
+  // always @ (posedge clk) begin
+  //   a_data_Xhl <= a_data_Dhl;
+  //   b_data_Xhl <= b_data_Dhl;
+  // end
+
+  // Output to vector lanes for vx. RS1 happens to also be B for these instructions.
+  assign rf_out_rs1_Xhl = b_data_Xhl;
+
+  wire [BISCUIT_P_NBITS-1:0] a_reg_mux_out_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] mem_data_reg_subword_Xhl = wb_access_dir_Xhl ? mem_data_reg_Xhl[31:32-BISCUIT_P_NBITS] : mem_data_reg_Xhl[BISCUIT_P_NBITS-1:0];
+  wire [BISCUIT_P_NBITS-1:0] temp_data_reg_mux_Xhl = (ir_Xhl[6:0] == 7'b1110011) ? csr_holding_reg_Xhl[BISCUIT_P_NBITS-1:0] : mem_data_reg_subword_Xhl;
+  assign a_reg_mux_out_Xhl = a_rd_tmp_Xhl ? temp_data_reg_mux_Xhl : a_data_Xhl;
+
+  wire [BISCUIT_P_NBITS-1:0] a_mux_out_Xhl = a_mux_sel_Xhl ? pc_plus4_mux_out_Xhl : a_reg_mux_out_Xhl;
+
+  wire [BISCUIT_P_NBITS-1:0] b_imm_mux_out_Xhl = b_use_imm_reg_Xhl ? b_imm_Xhl : {BISCUIT_P_NBITS{1'b0}};
+  wire [BISCUIT_P_NBITS-1:0] b_mux_out_Xhl = b_mux_sel_Xhl ? b_data_Xhl : b_imm_mux_out_Xhl;
+
+
+  reg carry_out_reg_Xhl;
+  reg msb_reg_Xhl;
+  // Microcode sets prop_flag_Xhl high if it propagates either the MSB (carry_in_1=1) or carry out (carry_in_1=0)
+  wire cmp_flag_type_Xhl = carry_in_1_Xhl;
+  wire cmp_flag_mux_out_Xhl = cmp_flag_type_Xhl ? msb_reg_Xhl : carry_out_reg_Xhl;
+  // Otherwise, carry-in is set constant. Use that constant.
+  wire carry_in_Xhl = prop_flag_Xhl ? cmp_flag_mux_out_Xhl : carry_in_1_Xhl;
+
+  // ALU
+  wire [BISCUIT_P_NBITS-1:0] sum_out_Xhl;
+  wire carry_out_Xhl;
+  wire a_b_not_eq_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] fn_out_Xhl;
+
+  reg  [BISCUIT_P_NBITS-1:0] adj_sw_sh_reg_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] shift_out_Xhl;
+
+  wire [(2*BISCUIT_P_NBITS)-1:0] mul_out_Xhl;
+  biscuit_CoreDpathAlu alu
+  (
+    .reset               (reset),
+    .in_a                (a_mux_out_Xhl),
+    .in_b                (b_mux_out_Xhl),
+    .in_c                (carry_in_Xhl),
+    .addsub_fn           (addsub_fn_Xhl),
+    .logic_fn            (logic_fn_Xhl),
+    .shift_dir           (shift_inst_dir_Xhl),
+    .signed_off_msb      (signed_off_msb_Xhl),
+    .bitwise_subword_sel (a_offset_mux_sel_Xhl),
+    .in_adj_subword      (adj_sw_sh_reg_Xhl),
+    .bitwise_shamt       (bitwise_shamt_Xhl),
+    .shift_out           (shift_out_Xhl),
+    .fn_type             (alu_fn_type_Xhl),
+    .sum_out             (sum_out_Xhl),
+    .carry_out           (carry_out_Xhl),
+    .a_b_not_eq          (a_b_not_eq_Xhl),
+    .fn_out              (fn_out_Xhl),
+    .mul_out             (mul_out_Xhl)
+  );
+
+
+  localparam INST_ARITH = 3'b000;
+  localparam INST_JALR  = 3'b011;
+  localparam INST_LOGIC = 3'b001;
+  localparam INST_SHIFT = 3'b010;
+  localparam INST_MUL   = 3'b100;
+
+  always @ (*) begin
+    alu_mux_out_Xhl = sum_out_Xhl;
+    case (alu_fn_type_Xhl)
+      INST_ARITH: alu_mux_out_Xhl = sum_out_Xhl;
+      INST_JALR:  alu_mux_out_Xhl = sum_out_Xhl & {{(BISCUIT_P_NBITS-1){1'b1}}, 1'b0}; // Bitwise and with fffe for jalr.
+      INST_LOGIC: alu_mux_out_Xhl = fn_out_Xhl;
+      INST_SHIFT: alu_mux_out_Xhl = shift_out_Xhl;
+      default:    alu_mux_out_Xhl = sum_out_Xhl;
+    endcase
+  end
+
+
+  // Carry-in/out flag register
+  //----------------------------
+  // Used in ADD/SUB ALU operations
+  reg carry_out_reg_Xhl_next;
+  always @ (*)
+  begin
+    carry_out_reg_Xhl_next = carry_out_reg_Xhl;
+    if (reset) begin
+      carry_out_reg_Xhl_next = 1'b0;
+    end else if (flag_reg_en_Xhl) begin
+      carry_out_reg_Xhl_next = carry_out_Xhl;
+    end
+  end
+
+  always @(posedge clk) begin
+    carry_out_reg_Xhl <= carry_out_reg_Xhl_next;
+  end
+
+  // MSB flag register
+  //-------------------
+  // Used for signed less-than comparisons
+  // Flag is set if A < B
+  // Less than Function: (!(!AB) & SUM) || A!B
+  // They are same sign and Difference produces a negative result || A is negative is B is Positive
+  reg msb_reg_Xhl_next;
+  always @ (*)
+  begin
+    msb_reg_Xhl_next = msb_reg_Xhl;
+    if (reset) begin
+      msb_reg_Xhl_next = 1'b0;
+    end else if (flag_reg_en_Xhl) begin
+      msb_reg_Xhl_next = (!(!a_mux_out_Xhl[BISCUIT_P_NBITS-1] && b_mux_out_Xhl[BISCUIT_P_NBITS-1]) && sum_out_Xhl[BISCUIT_P_NBITS-1]) || (a_mux_out_Xhl[BISCUIT_P_NBITS-1] && !b_mux_out_Xhl[BISCUIT_P_NBITS-1]);
+    end
+  end
+
+  always @(posedge clk) begin
+    msb_reg_Xhl <= msb_reg_Xhl_next;
+  end
+
+  // ================================================================
+  // Branch Logic
+  // ================================================================
+  localparam BR_BEQ  = 3'b000;
+  localparam BR_BNE  = 3'b001;
+  localparam BR_BLT  = 3'b100;
+  localparam BR_BGE  = 3'b101;
+  localparam BR_BLTU = 3'b110;
+  localparam BR_BGEU = 3'b111;
+
+  // Equality
+  //==========
+  // Equality flag state register
+  //------------------------------
+  // Flag is set if inequality detected
+  // When not propagating flags, base on current inputs
+  // When propagating inputs, keep flag high if previously set and OR with current inputs.
+  // Setting carry_in_1_Xhl has undefined behavior
+  reg eq_flag_reg_Xhl_next;
+  reg eq_flag_reg_Xhl;
+  always @(*)
+  begin
+    eq_flag_reg_Xhl_next = eq_flag_reg_Xhl;
+    if (reset) begin
+      eq_flag_reg_Xhl_next = 1'b0;
+
+    end else if (flag_reg_en_Xhl) begin
+      eq_flag_reg_Xhl_next =  prop_flag_Xhl ? (a_b_not_eq_Xhl || eq_flag_reg_Xhl)
+                            :(carry_in_1_Xhl ? 1'b1 : a_b_not_eq_Xhl);
+    end
+  end
+
+  always @(posedge clk)
+  begin
+    eq_flag_reg_Xhl <= eq_flag_reg_Xhl_next;
+  end
+
+  // Signed LT Comparison
+  //======================
+  //  LT comparison: Perform signed A - B. If MSB of difference is a 1, A > B. Same as SLT logic
+  //  msb_reg_Xhl_next already performs this operation, to be stored ind msb_reg if flags enabled
+  wire a_signed_lt_b_Xhl = msb_reg_Xhl_next;
+
+  // Unsigned LT Comparison
+  //========================
+  //  LT Unsigned Comparison: If A[31] ^ B[31]=0, whichever is 1 is greater. Otherwise, perform signed subtraction.
+  wire a_b_msb_neq_Xhl = a_mux_out_Xhl[BISCUIT_P_NBITS-1] ^ b_mux_out_Xhl[BISCUIT_P_NBITS-1];
+  wire a_unsigned_lt_b_Xhl = ~a_mux_out_Xhl[BISCUIT_P_NBITS-1] & b_mux_out_Xhl[BISCUIT_P_NBITS-1];
+
+  always @(*)begin
+    case (br_type_Xhl)
+    BR_BNE: branch_taken_Xhl =   a_b_not_eq_Xhl || eq_flag_reg_Xhl;
+    BR_BEQ: branch_taken_Xhl = !(a_b_not_eq_Xhl || eq_flag_reg_Xhl);
+    BR_BLT: branch_taken_Xhl = a_signed_lt_b_Xhl;
+    BR_BGE: branch_taken_Xhl = !a_signed_lt_b_Xhl;
+    BR_BLTU: branch_taken_Xhl = a_unsigned_lt_b_Xhl || (!a_b_msb_neq_Xhl && a_signed_lt_b_Xhl);
+    BR_BGEU: branch_taken_Xhl = !(a_unsigned_lt_b_Xhl || (!a_b_msb_neq_Xhl && a_signed_lt_b_Xhl));
+    default: branch_taken_Xhl = 1'b0;
+  endcase
+  end
+
+
+  // B immediate select register
+  //-----------------------------
+  //   Indicates whether branch is taken and selects either branch offset or 0 to add to PC
+
+  reg b_use_imm_reg_Xhl_next;
+  always @(*)
+  begin
+    b_use_imm_reg_Xhl_next = b_use_imm_reg_Xhl;
+    if (reset) begin
+      b_use_imm_reg_Xhl_next = 1'b1;
+    end else if (last_uop_Xhl) begin // Set to use immediates by default every instruction
+      b_use_imm_reg_Xhl_next = 1'b1;
+    end else if (br_reg_en_Xhl) begin // Set b_imm_mux_out_Xhl to 0 if branch is not taken.
+      b_use_imm_reg_Xhl_next = branch_taken_Xhl;
+    end
+  end
+
+  always @(posedge clk) begin
+    b_use_imm_reg_Xhl <= b_use_imm_reg_Xhl_next;
+  end
+
+
+
+  // ================================================================
+  // Shifting Logic
+  // Can be moved to CTRL if not supporting individual lane accesses
+  // ================================================================
+
+
+  // Adjacent Subword Regiser
+  //--------------------------
+  reg [BISCUIT_P_NBITS-1:0] adj_sw_sh_reg_Xhl_next;
+  always @(*)
+  begin
+    adj_sw_sh_reg_Xhl_next = adj_sw_sh_reg_Xhl;
+    if (reset) begin
+      adj_sw_sh_reg_Xhl_next = {BISCUIT_P_NBITS{1'b0}};
+    end else if (adj_sw_reg_en_Xhl) begin
+      adj_sw_sh_reg_Xhl_next = adj_sw_mux_sel_Xhl ? {BISCUIT_P_NBITS{msb_reg_Xhl}} : a_mux_out_Xhl;
+    end
+  end
+
+  // Gate Clock
+  wire adj_gate_en_Xhl = !(adj_sw_reg_en_Xhl || reset);
+  wire adj_reg_clk_gated_Xhl;
+
+  biscuit_ClkEnBuf adj_reg_clk_gate
+  (
+    .clk  (adj_reg_clk_gated_Xhl),
+    .rclk (clk),
+    .en_l (adj_gate_en_Xhl)
+  );
+
+  always @(posedge adj_reg_clk_gated_Xhl) begin
+    adj_sw_sh_reg_Xhl <= adj_sw_sh_reg_Xhl_next;
+  end
+
+  // Shift amount storage
+  //----------------------
+<%
+if BISCUIT_P_NBITS == 1:
+  print("      reg bitwise_shamt_reg_Xhl_next; // dummy for bit-serial")
+else:
+  print("      reg [BISCUIT_C_LOG_NBITS-1:0] bitwise_shamt_reg_Xhl_next;")
+%>
+  reg [5-BISCUIT_C_LOG_NBITS:0] subword_shamt_reg_Xhl; // Signed value
+
+  wire [4:0] shamt_mux_out_Xhl = shamt_mux_sel_Xhl ? 5'b0 : shamt_imm_Xhl; // TODO: Read bottom 5 bits of register to support register-based shifts or change register shift algorithm.
+
+  wire [5-BISCUIT_C_LOG_NBITS:0] subword_shamt_unsigned_Xhl = {1'b0, shamt_mux_out_Xhl[4:BISCUIT_C_LOG_NBITS]};
+  wire [5-BISCUIT_C_LOG_NBITS:0] signed_subword_shamt_Xhl = shift_inst_dir_Xhl ? subword_shamt_unsigned_Xhl : -subword_shamt_unsigned_Xhl;
+
+
+  reg [5-BISCUIT_C_LOG_NBITS:0] subword_shamt_reg_Xhl_next; //signed value
+  always @(*) begin
+    bitwise_shamt_reg_Xhl_next = bitwise_shamt_Xhl;
+    subword_shamt_reg_Xhl_next = subword_shamt_reg_Xhl;
+    if (reset) begin
+<%
+if BISCUIT_P_NBITS == 1:
+  print("      bitwise_shamt_reg_Xhl_next = 1'b0; // dummy for bit-serial")
+else:
+  print("      bitwise_shamt_reg_Xhl_next = {BISCUIT_C_LOG_NBITS{1'b0}};")
+%>
+      subword_shamt_reg_Xhl_next = {(BISCUIT_C_OFFBITS+1){1'b0}};
+    end else if (shamt_reg_en_Xhl) begin
+<%
+if BISCUIT_P_NBITS == 1:
+  print("        bitwise_shamt_reg_Xhl_next = 1'b0; // dummy for bit-serial")
+else:
+  print("        bitwise_shamt_reg_Xhl_next = shamt_mux_out_Xhl[BISCUIT_C_LOG_NBITS-1:0]; // Use unsigned value for bitwise shift")
+%>
+      subword_shamt_reg_Xhl_next = signed_subword_shamt_Xhl;
+    end
+  end
+
+  always @(posedge clk) begin
+    bitwise_shamt_Xhl <= bitwise_shamt_reg_Xhl_next;
+    subword_shamt_reg_Xhl <= subword_shamt_reg_Xhl_next;
+  end
+
+  // Operand A subword offset indexing
+  //-----------------------------------
+  wire [BISCUIT_C_OFFBITS:0] a_offset_mux_Dhl;
+  assign a_offset_mux_Dhl = a_offset_mux_sel_Dhl ? subword_shamt_reg_Xhl : {(BISCUIT_C_OFFBITS+1){1'b0}};
+  // Ignore carry-out. Take advantage of over/underflow
+  wire signed_off_msb_Dhl;
+  assign {signed_off_msb_Dhl, a_subword_idx_Dhl} = a_offset_mux_Dhl + {1'b0, a_subword_off_Dhl};
+  always @(posedge clk) begin
+    signed_off_msb_Xhl <= signed_off_msb_Dhl;
+  end
+
+  //-------------------
+  // Memory interface
+  //-------------------
+
+  // Address Register
+  //------------------
+  reg [31:0] mem_addr_reg_Xhl;
+  reg [31:0] mem_addr_reg_Xhl_next;
+  always @(*) begin
+    mem_addr_reg_Xhl_next = mem_addr_reg_Xhl;
+    if (reset) begin
+      mem_addr_reg_Xhl_next = 32'b0;
+    end else if (wb_to_addr_Xhl) begin
+      mem_addr_reg_Xhl_next = {alu_mux_out_Xhl, mem_addr_reg_Xhl[31:BISCUIT_P_NBITS]};
+    end else if (sp_subword_incr_Xhl) begin
+      mem_addr_reg_Xhl_next = mem_addr_reg_Xhl + (BISCUIT_P_NBITS*BISCUIT_P_NLANES/8); // Increment by 1 line in SP for transposed accesses
+    end
+  end
+
+  always @(posedge clk) begin
+    mem_addr_reg_Xhl <= mem_addr_reg_Xhl_next;
+  end
+
+  assign dmemreq_msg_addr_Xhl = mem_addr_reg_Xhl;
+
+  // Data Register
+  //---------------
+
+  // First bit: signed=0, unsigned=1
+  // Second bit length: 1 = 1B, 2 = 2B, 3 = 8B, 0 = 4B
+  localparam SBYTE = 3'b001;
+  localparam SHALF = 3'b010;
+  localparam SWORD = 3'b000;
+  localparam UBYTE = 3'b101;
+  localparam UHALF = 3'b110;
+  reg [31:0] mem_data_reg_Xhl_next;
+  reg [31:0] vl_reg_Xhl_next;
+  always @(*) begin
+    mem_data_reg_Xhl_next = mem_data_reg_Xhl;
+    if (reset) begin
+      mem_data_reg_Xhl_next = 32'b0;
+    end else if (dmemresp_val_Xhl) begin
+      case ({dmemreq_signed_Xhl,dmemreq_msg_len_Xhl})
+        SBYTE: mem_data_reg_Xhl_next = {{24{dmemresp_msg_data_Xhl[7]}},dmemresp_msg_data_Xhl[7:0]};
+        SHALF: mem_data_reg_Xhl_next = {{16{dmemresp_msg_data_Xhl[15]}},dmemresp_msg_data_Xhl[15:0]};
+        SWORD: mem_data_reg_Xhl_next = dmemresp_msg_data_Xhl;
+        UBYTE: mem_data_reg_Xhl_next = {24'b0,dmemresp_msg_data_Xhl[7:0]};
+        UHALF: mem_data_reg_Xhl_next = {16'b0,dmemresp_msg_data_Xhl[15:0]};
+        default: mem_data_reg_Xhl_next = 32'b0;
+      endcase
+    end else if (wb_to_data_Xhl) begin
+      if (vl_reg_en_Xhl) begin // Indicates setvl instruction
+        mem_data_reg_Xhl_next = vl_reg_Xhl_next;
+      end else begin
+        if (wb_access_dir_Xhl) begin
+          mem_data_reg_Xhl_next = {mem_data_reg_Xhl[31-BISCUIT_P_NBITS:0],alu_mux_out_Xhl};
+        end else begin
+          mem_data_reg_Xhl_next = {alu_mux_out_Xhl, mem_data_reg_Xhl[31:BISCUIT_P_NBITS]};
+        end
+      end
+    end else if (a_rd_tmp_Xhl) begin
+      if (wb_access_dir_Xhl) begin // same as a_access_dir_Xhl
+        mem_data_reg_Xhl_next = {mem_data_reg_Xhl[31-BISCUIT_P_NBITS:0], mem_data_reg_Xhl[31:32-BISCUIT_P_NBITS]};
+      end else begin
+        mem_data_reg_Xhl_next = {mem_data_reg_Xhl[BISCUIT_P_NBITS-1:0], mem_data_reg_Xhl[31:BISCUIT_P_NBITS]};
+      end
+    end
+  end
+
+  always @(posedge clk) begin
+    mem_data_reg_Xhl <= mem_data_reg_Xhl_next;
+  end
+
+
+  assign dmemreq_msg_data_Xhl = mem_data_reg_Xhl;
+
+  // CSR Holding Reg
+  //-----------------
+  reg [31:0] csr_holding_reg_Xhl_next;
+
+  always @(*) begin
+    csr_holding_reg_Xhl_next = csr_holding_reg_Xhl;
+    if (reset) begin
+      csr_holding_reg_Xhl_next = 32'b0;
+    end else if (csr_read_en_Xhl) begin
+      csr_holding_reg_Xhl_next = csr_read_data_Xhl;
+    end else if (a_rd_tmp_Xhl) begin
+      csr_holding_reg_Xhl_next = {csr_holding_reg_Xhl[BISCUIT_P_NBITS-1:0], csr_holding_reg_Xhl[31:BISCUIT_P_NBITS]};
+    end
+  end
+
+  always @(posedge clk) begin
+    csr_holding_reg_Xhl <= csr_holding_reg_Xhl_next;
+  end
+  //==================
+  // Vector interface
+  //==================
+
+  // AVL Register
+  //------------------
+  // Note: uses wb_to_addr_Xhl signal to prevent adding unnecessary controls signals
+  // Note: Previously shifts x[rs1] into avl reg one subword at a time.
+  //       Now it should take the value from rs1 and store it to the avl_reg_Xhl.
+  reg [31:0] avl_reg_Xhl_next;
+  always @(*) begin
+    avl_reg_Xhl_next = avl_reg_Xhl;
+    if (reset) begin
+      avl_reg_Xhl_next = 32'b0;
+    end else if (wb_to_addr_Xhl) begin
+      if (rs1_Xhl != 5'b0) begin
+        avl_reg_Xhl_next = {alu_mux_out_Xhl, avl_reg_Xhl[31:BISCUIT_P_NBITS]};
+      end else if (waddr_Xhl == 5'b0) begin
+        avl_reg_Xhl_next = vl_reg_Xhl;
+      end else begin
+        avl_reg_Xhl_next = 32'hffffffff;
+      end
+    end
+  end
+
+  always @(posedge clk) begin
+    avl_reg_Xhl <= avl_reg_Xhl_next;
+  end
+
+  // vl Register
+  //-------------
+  always @(*) begin
+    vl_reg_Xhl_next = vl_reg_Xhl;
+    if (reset) begin
+      vl_reg_Xhl_next = 32'b0;
+    end else if (avl_reg_Xhl[31:BISCUIT_C_NLANES_NBITS] == {(32-BISCUIT_C_NLANES_NBITS){1'b0}}) begin
+      vl_reg_Xhl_next = avl_reg_Xhl;
+    end else begin
+<%
+print("      vl_reg_Xhl_next = 32'd"+str(BISCUIT_P_NLANES)+";")
+%>
+    end
+  end
+
+  always @(posedge clk) begin
+    if (reset) begin
+      vl_reg_Xhl <= 32'h00000000;
+    end else if (vl_reg_en_Xhl) begin
+      vl_reg_Xhl <= vl_reg_Xhl_next;
+    end
+  end
+
+
+
+endmodule
+`endif

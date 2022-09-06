@@ -1,0 +1,45 @@
+`ifndef BISCUIT_SHIFT_DEMUX_V
+`define BISCUIT_SHIFT_DEMUX_V
+<%
+from pyhplib import *
+%>
+module biscuit_ShiftDemux
+(
+  input reset,
+  input clk,
+
+  input direction, //1 = +1 = indexing one left (towards MSB).
+  input en,
+
+<%
+print('  output reg ['+str(BISCUIT_C_OFFBITS-1)+':0]  idx  // Current index (to be read from)')
+%>
+);
+
+<%
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS)+';')
+%>
+
+// Address Calculation based on inputs
+reg [BISCUIT_C_OFFBITS-1:0] idx_next;
+always @(*) begin
+  idx_next = idx;
+  if (reset) begin
+    idx_next = {BISCUIT_C_OFFBITS{1'b0}};
+  end else if(en) begin
+    if (direction) begin
+      idx_next = idx + {{BISCUIT_C_OFFBITS-1{1'b0}}, 1'b1};
+    end else begin
+      idx_next = idx - {{BISCUIT_C_OFFBITS-1{1'b0}}, 1'b1};
+    end
+  end
+end
+
+// Note: not gating for now since it's in ctrl, not critical.
+always @ (posedge clk) begin
+  idx <= idx_next;
+end
+
+endmodule
+
+`endif

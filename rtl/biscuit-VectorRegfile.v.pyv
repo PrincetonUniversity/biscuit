@@ -1,0 +1,131 @@
+//=========================================================================
+// Variable Bit Width Vector Register File - Accesses one subword at a time.
+//=========================================================================
+
+`ifndef BISCUIT_VECTOR_REGFILE_V
+`define BISCUIT_VECTOR_REGFILE_V
+
+<%
+#import param_Defines as p
+from pyhplib import *
+import numpy as np
+%>
+
+module biscuit_VectorRegfile
+(
+  input            clk,
+  input  [ 4:0]    raddr0_Rhl, // Read 0 address (combinational input)
+<%
+print('  input  ['+str(BISCUIT_C_OFFBITS-1)+':0]     roff0_Rhl,  // Offset within a register to read from')
+print('  output reg ['+str(BISCUIT_P_NLANES * BISCUIT_P_NBITS - 1)+':0] rdata0_Xhl, // Read 0 data (clocked)')
+%>
+  
+  input  [ 4:0]      raddr1_Rhl, // Read 1 address (combinational input)
+<%
+print('  input  ['+str(BISCUIT_C_OFFBITS-1)+':0]       roff1_Rhl,  // Offset within a register to read from')
+print('  output reg ['+str(BISCUIT_P_NLANES * BISCUIT_P_NBITS -  1)+':0]   rdata1_Xhl, // Read 0 data (clocked)')
+%>
+  input          wen_Xhl,    // Write enable (sample on rising clk edge)
+  input  [ 4:0]  waddr_Xhl,  // Write address (sample on rising clk edge)
+<%
+print('  input  ['+str(BISCUIT_C_OFFBITS-1)+':0]   woffset_Xhl,  // Offset within a register to write to ')
+print('  input  ['+str(BISCUIT_P_NLANES * BISCUIT_P_NBITS - 1)+':0]   wdata_Xhl    // Write data (sample on rising clk edge)')
+%>
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_P_NLANES = '+str(BISCUIT_P_NLANES)+';')
+C_WORD_LINE_WIDTH=BISCUIT_P_NLANES*32
+C_SUBWORD_LINE_WIDTH=BISCUIT_P_NLANES*BISCUIT_P_NBITS
+%>
+localparam C_WORD_LINE_WIDTH=BISCUIT_P_NLANES*32;
+localparam C_SUBWORD_LINE_WIDTH=BISCUIT_P_NLANES*BISCUIT_P_NBITS;
+
+  // We use an array of 32 bit register for the regfile itself
+  reg [C_WORD_LINE_WIDTH-1:0] registers[31:0];
+
+  // Clocked read ports
+
+  wire [C_WORD_LINE_WIDTH-1:0] rdata0_word = ( raddr0_Rhl == 0 ) ? {C_WORD_LINE_WIDTH{1'b0}} : registers[raddr0_Rhl];
+  wire [C_WORD_LINE_WIDTH-1:0] rdata1_word = ( raddr1_Rhl == 0 ) ? {C_WORD_LINE_WIDTH{1'b0}} : registers[raddr1_Rhl];
+
+
+// Read values combinationally
+reg [C_SUBWORD_LINE_WIDTH-1:0] rdata0_Rhl;
+reg [C_SUBWORD_LINE_WIDTH-1:0] rdata1_Rhl;
+  always @(*) begin
+    case(roff0_Rhl)
+<%
+for offset in range(BISCUIT_C_N_OFF):
+  lane_idx = np.multiply(32,range(BISCUIT_P_NLANES))
+  idx_hi = np.add(lane_idx,((offset+1) * BISCUIT_P_NBITS) - 1)
+  idx_lo = np.add(lane_idx,offset * BISCUIT_P_NBITS)
+  concat_str = ["rdata0_word["+str(x)+":"+str(y)+"]" for x,y in zip(idx_hi,idx_lo)]
+  concat_str.reverse()
+  concat_str = "{"+ (",".join(concat_str)) + "};"
+  
+  #// Concatenate these bits from each 32-bit wwide chunk in the array.
+  print('      '+BISCUIT_C_OFFBITS_STR+'\'d'+str(offset)+': rdata0_Rhl = ' + concat_str)
+print('      default: rdata0_Rhl = '+str(C_SUBWORD_LINE_WIDTH)+'\'d0;')
+%>    endcase
+  end
+
+  always @(*) begin
+    case(roff1_Rhl)
+<%
+for offset in range(BISCUIT_C_N_OFF):
+  lane_idx = np.multiply(32,range(BISCUIT_P_NLANES))
+  idx_hi = np.add(lane_idx,((offset+1) * BISCUIT_P_NBITS) - 1)
+  idx_lo = np.add(lane_idx,offset * BISCUIT_P_NBITS)
+  concat_str = ["rdata1_word["+str(x)+":"+str(y)+"]" for x,y in zip(idx_hi,idx_lo)]
+  concat_str.reverse()
+  concat_str = "{"+ (",".join(concat_str)) + "};"
+  
+  #// Concatenate these bits from each 32-bit wwide chunk in the array.
+  print('      '+BISCUIT_C_OFFBITS_STR+'\'d'+str(offset)+': rdata1_Rhl = ' + concat_str)
+print('      default: rdata1_Rhl = '+str(C_SUBWORD_LINE_WIDTH)+'\'d0;')
+%>    endcase
+  end
+
+// Output values on clock
+always @(posedge clk) begin
+  rdata0_Xhl <= rdata0_Rhl;
+  rdata1_Xhl <= rdata1_Rhl;
+end
+
+  // Write port is active only when wen is asserted
+<%
+
+#// Split up Write data
+for lane in range(BISCUIT_P_NLANES):
+  print('//-------------------')
+  print('// LANE' +str(lane))
+  print('//-------------------')
+
+  lane_idx_hi = BISCUIT_P_NBITS*(lane+1)-1
+  lane_idx_lo = BISCUIT_P_NBITS*lane
+  print("wire [BISCUIT_P_NBITS-1:0] lane_"+str(lane)+"_wdata_Xhl = wdata_Xhl["+str(lane_idx_hi)+":"+str(lane_idx_lo)+"];")
+
+  line_offset = 32 * lane
+  
+  for idx in range(32):
+    
+    print("\n  //Register " + str(idx) + ":")
+    for offset in range(int(32/BISCUIT_P_NBITS)):
+      print('  always @(posedge clk) begin')
+      print('    if ((waddr_Xhl == 5\'d' + str(idx) + ') && (woffset_Xhl == '+ BISCUIT_C_OFFBITS_STR + '\'d' + str(offset) + ') && (wen_Xhl == 1\'b1)) begin')
+      
+      # // calculate bit bounds for this offset
+      idx_hi = ((offset+1) * BISCUIT_P_NBITS) - 1
+      idx_lo = offset * BISCUIT_P_NBITS
+      
+      print('      registers['+str(idx)+'][' + str(line_offset+idx_hi) + ':' + str(line_offset+idx_lo) +'] <= lane_'+str(lane)+'_wdata_Xhl;')
+      print('    end')
+      print('  end')
+%>
+
+endmodule
+
+`endif
+

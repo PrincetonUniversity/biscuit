@@ -1,0 +1,17 @@
++incdir+../include
+
+biscuit-ClkEnBuf.v
+biscuit-Core.v
+biscuit-CoreDpathAlu.v
+biscuit-CoreDpathRegfile.v
+biscuit-Ctrl.v
+biscuit-DeserializedReg.v
+biscuit-Dpath.v
+biscuit-PCComputation.v
+biscuit-SIMDLaneDpath.v
+biscuit-ShiftDemux.v
+biscuit-ScalarDpath.v
+
+biscuit-VectorRegfile.v
+biscuit-CoreDpathRegfile.v
+biscuit-SerializedRegfile.v

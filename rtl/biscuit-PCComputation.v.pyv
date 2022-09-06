@@ -1,0 +1,190 @@
+`ifndef BISCUIT_PC_COMPUTATION_V
+`define BISCUIT_PC_COMPUTATION_V
+<%
+from pyhplib import *
+%>
+
+module biscuit_PCComputation
+(
+  input                 clk,
+  input                 reset,
+  input                 overwrite_pc,
+  input [31:0]          overwrite_pc_addr,
+  input                 last_uop_Xhl,
+  input                 new_rfreq_Fhl,
+  input                 accept_new_inst_Rhl,
+  input                 accept_new_inst_Dhl,
+  input                 pc_mux_sel_Xhl,
+  input                 b_use_imm_reg_Xhl,
+<%
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]   alu_mux_out_Xhl,')
+%>
+  input                 pc_plus4_mux_sel_Xhl,
+  input                 a_mux_sel_Xhl,
+  input                 addr_shift_dir_sel_Xhl,
+  input                 addr_reg_en_Xhl,
+<%
+print('  output ['+str(BISCUIT_P_NBITS-1)+':0]  pc_plus4_mux_out_Xhl,')
+%>
+  output     [31:0]     addr_reg_Xhl,
+  output reg [31:0]     pc_Fhl,
+  output reg [31:0]     pc_next_Fhl
+
+);
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS) + ';')
+%>
+
+  // -------------------
+  // Fetch PC Selection
+  // -------------------
+
+  wire [31:0] pc_plus4_Fhl = pc_Fhl + 32'd4;
+
+  wire [31:0] pc_mux_out_Xhl = (pc_mux_sel_Xhl && b_use_imm_reg_Xhl) ? {alu_mux_out_Xhl, addr_reg_Xhl[(31-BISCUIT_P_NBITS):0]} : pc_plus4_Fhl; 
+  // Fetch new PC when an instruction enters D stage or when a branch/jump is taken.
+  // A branch is taken on the last uop of the ins
+  wire brj_taken = last_uop_Xhl && pc_mux_sel_Xhl && b_use_imm_reg_Xhl;
+  // reg [31:0] pc_next_Fhl;
+  always @ (*)
+  begin
+    pc_next_Fhl = pc_Fhl;
+    if(reset) begin
+      pc_next_Fhl = 32'h40000000;
+    end else if (overwrite_pc) begin
+      pc_next_Fhl = overwrite_pc_addr;
+    end else if (accept_new_inst_Rhl || brj_taken) begin
+      pc_next_Fhl = pc_mux_out_Xhl;
+    end
+  end
+
+  wire pc_reg_clk_en = !(accept_new_inst_Rhl || reset || overwrite_pc || brj_taken); 
+  wire pc_reg_clk_gated;
+  biscuit_ClkEnBuf pc_reg_clk_gate
+  (
+    .clk(pc_reg_clk_gated),
+    .rclk(clk),
+    .en_l(pc_reg_clk_en)
+  );
+
+  always @(posedge pc_reg_clk_gated) begin
+    pc_Fhl <= pc_next_Fhl;
+  end
+
+  //------------------------------
+  // PC tracking through pipeline (from scalar dpath)
+  //------------------------------
+
+  reg [31:0] pc_Rhl;
+  reg [31:0] pc_Dhl;
+  reg [31:0] pc_Xhl;
+
+  always @ (posedge clk) begin
+    if (reset) begin
+      pc_Rhl <= 32'b0;
+      pc_Dhl <= 32'b0;
+      pc_Xhl <= 32'b0;
+    end else begin
+      if (new_rfreq_Fhl) begin
+        pc_Rhl <= pc_Fhl;
+      end
+      if (accept_new_inst_Dhl) begin
+        pc_Dhl <= pc_Rhl;
+      end
+      pc_Xhl <= pc_Dhl;
+    end
+  end
+
+
+  // ---------------------------
+  // Branch target calculation
+  // ---------------------------
+  // Address Deserializing Register
+
+  // Translating addr_shift_dir_sel_Xhl and addr_reg_en_Xhl to 1-hot subword enable signal
+  wire [BISCUIT_C_OFFBITS-1:0] addr_reg_subword_en_idx_Xhl;
+  biscuit_ShiftDemux addr_demux
+  (
+    .reset     (reset),
+    .clk       (clk),
+
+    .direction (addr_shift_dir_sel_Xhl),
+    .en        (addr_reg_en_Xhl),
+
+    .idx       (addr_reg_subword_en_idx_Xhl)
+  );
+
+  biscuit_DeserializedReg addr_reg
+  (
+    .reset          (reset),
+    .clk            (clk),
+    .subword_en_idx (addr_reg_subword_en_idx_Xhl),
+    .data_in        (alu_mux_out_Xhl),
+
+    .out            (addr_reg_Xhl)
+  );
+
+  // ---------------------------------
+  // PC ALU input shifting interface
+  // ---------------------------------
+  wire [31:0] pc_plus4_Xhl = pc_Xhl + 32'd4;
+  
+  reg [31:0] pc_shift_reg_Xhl;
+  reg [31:0] pc_shift_reg_Xhl_next;
+
+  reg [31:0] pc_plus4_shift_reg_Xhl;
+  reg [31:0] pc_plus4_shift_reg_Xhl_next;
+
+  reg prev_accept_new_inst_Dhl;
+  always @(posedge clk) begin
+    if (reset) begin
+      prev_accept_new_inst_Dhl <= 1'b0;
+    end else begin
+      prev_accept_new_inst_Dhl <= accept_new_inst_Dhl;
+    end
+  end
+
+  always @(*) begin
+    // By default, set shift registers to their non-shifting counterparts
+    pc_shift_reg_Xhl_next = pc_Xhl;
+    pc_plus4_shift_reg_Xhl_next = pc_plus4_Xhl;
+    if (reset) begin
+      // Initialize to 0
+      pc_shift_reg_Xhl_next = 32'b0;
+      pc_plus4_shift_reg_Xhl_next =32'b0;
+    end else if (prev_accept_new_inst_Dhl) begin
+      // When there is a new instruction, set the new shift registers to their new non-shifting counteparts
+      // This occurs a cycle after there is a new instruction in the D stage.
+      pc_shift_reg_Xhl_next = pc_Dhl;
+      pc_plus4_shift_reg_Xhl_next = pc_Dhl + 32'd4;
+    end else if (!pc_plus4_mux_sel_Xhl && a_mux_sel_Xhl) begin
+      // If we are reading from the pc shift register, cycle pc shift register by one subword
+      pc_shift_reg_Xhl_next = {pc_shift_reg_Xhl[BISCUIT_P_NBITS-1:0], pc_shift_reg_Xhl[31:BISCUIT_P_NBITS]};
+    end else if (pc_plus4_mux_sel_Xhl && a_mux_sel_Xhl) begin
+      // If we are reading from the pc+4 ...
+      pc_plus4_shift_reg_Xhl_next = {pc_plus4_shift_reg_Xhl[BISCUIT_P_NBITS-1:0], pc_plus4_shift_reg_Xhl[31:BISCUIT_P_NBITS]};
+    end
+  end
+
+  // Clock gating
+  wire pc_shift_reg_gated;
+  wire pc_shift_gate_en = !(prev_accept_new_inst_Dhl || a_mux_sel_Xhl || reset);
+  biscuit_ClkEnBuf pc_shift_enable
+  (
+    .clk (pc_shift_reg_gated),
+    .rclk(clk),
+    .en_l(pc_shift_gate_en)
+  );
+
+  always @(posedge pc_shift_reg_gated) begin
+    pc_shift_reg_Xhl <= pc_shift_reg_Xhl_next;
+    pc_plus4_shift_reg_Xhl <= pc_plus4_shift_reg_Xhl_next;
+  end
+
+  wire [BISCUIT_P_NBITS-1:0] pc_bit_Xhl = pc_shift_reg_Xhl[BISCUIT_P_NBITS-1:0];
+  wire [BISCUIT_P_NBITS-1:0] pc_plus4_bit_Xhl = pc_plus4_shift_reg_Xhl[BISCUIT_P_NBITS-1:0];
+  assign pc_plus4_mux_out_Xhl = pc_plus4_mux_sel_Xhl ? pc_plus4_bit_Xhl : pc_bit_Xhl;
+
+endmodule
+`endif

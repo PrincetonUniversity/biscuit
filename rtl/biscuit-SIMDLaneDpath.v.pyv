@@ -1,0 +1,595 @@
+
+`ifndef BISCUIT_SIMD_LANE_DPATH_V
+`define BISCUIT_SIMD_LANE_DPATH_V
+
+<%
+from pyhplib import *
+%>
+
+
+module biscuit_SIMDLaneDpath
+(
+
+  input         clk,
+  input         reset,
+
+
+<%
+#//print('  input ['+str(BISCUIT_P_NBITS-1)+':0] vrf_out_a_Xhl,')
+#//print('  input ['+str(BISCUIT_P_NBITS-1)+':0] vrf_out_b_Xhl,')
+%>
+
+  // Register File
+  input                 vrfreq_val_Fhl,
+  input                 vrfresp_rdy_Rhl,
+  input                 rd_en0,
+  input [4:0]           vs1_addr_Fhl,
+  input                 rd_en1,
+  input [4:0]           vs2_addr_Fhl,
+  input                 vrf_wen_Xhl,
+  input [4:0]           waddr_Xhl,
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] wb_subword_off_Xhl,')
+%>
+
+  input                 wb_access_dir_Xhl,
+
+  input [4:0]           vs1_Dhl,
+  input [4:0]           vs2_Dhl,
+  input [4:0]           rega_addr_Dhl,
+  input [4:0]           regb_addr_Dhl,
+  input [1:0]           rega_arch_reg_Xhl,
+  input [1:0]           regb_arch_reg_Xhl,
+  // input [31:0]          vrf_wdata_Xhl,
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] a_subword_idx_Dhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] b_subword_off_Dhl,')
+%>
+
+  input                 v_use_scalar_rs1_Xhl,
+<%
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]          scalar_rf_out_rs1_Xhl,')
+%>
+  // ALU Inputs
+  input                 shift_inst_dir_Xhl,
+  input                 signed_off_msb_Xhl,
+  input                 a_offset_mux_sel_Xhl,
+<%
+if BISCUIT_P_NBITS == 1:
+  print('      input                 bitwise_shamt_Xhl, // dummy for bit-serial')
+else:
+  print('      input ['+str(BISCUIT_C_LOG_NBITS-1)+':0] bitwise_shamt_Xhl,')
+%>
+  input                 adj_sw_mux_sel_Xhl,
+  input                 adj_sw_reg_en_Xhl,
+
+<%
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]   b_imm_Xhl,')
+%>
+  input                 b_mux_sel_Xhl,
+
+  input       addsub_fn_Xhl,
+  input [1:0] logic_fn_Xhl,
+  input [2:0] alu_fn_type_Xhl,
+
+  input         prop_flag_Xhl,
+  input         carry_in_1_Xhl,
+  input         flag_reg_en_Xhl,
+
+  input      mul_fn_add_Xhl,
+  input      mul_fn_shift_Xhl,
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_wr_off_Xhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_rfwb_off_Xhl,')
+%>
+  input     [63:0] mul_inter_reg_en_Xhl, // TEMP size, can be optimized
+  input            last_uop_Xhl,
+
+  // Outputs to Scalar core for summary
+<%
+print('  output reg ['+str(2*BISCUIT_P_NBITS-1)+':0] dummy_vs1_holding_Dhl,')
+print('  output reg ['+str(BISCUIT_P_NBITS-1)+':0] dummy_vs2_holding_Dhl,')
+print('  output reg ['+str(BISCUIT_P_NBITS-1)+':0] alu_mux_out_Xhl   // For use in writing to CSR')
+%>
+
+
+
+
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_C_LOG_NBITS = '+str(BISCUIT_C_LOG_NBITS) + ';')
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS) + ';')
+%>
+
+  //-------------------------
+  // Register Read Stage (R)
+  //-------------------------
+
+wire        vrfreq_rdy_Fhl;  // Unused -- Debug Signal
+wire        vrfresp_val_Rhl; // Unused -- Debug Signal
+wire [31:0] vrfresp_vs1_data_Rhl;
+wire [31:0] vrfresp_vs2_data_Rhl;
+wire [31:0] vrf_wdata_Xhl;
+biscuit_SerializedRegfile
+#(1)
+vrf
+(
+  .clk                (clk),
+  .reset              (reset),
+
+  .rfreq_val          (vrfreq_val_Fhl),
+  .rfreq_rdy          (vrfreq_rdy_Fhl),
+  .rfresp_val         (vrfresp_val_Rhl),
+  .rfresp_rdy         (vrfresp_rdy_Rhl),
+
+  .rd_en0             (rd_en0),
+  .raddr0             (vs1_addr_Fhl),
+  .rd_en1             (rd_en1),
+  .raddr1             (vs2_addr_Fhl),
+
+  .wen                (vrf_wen_Xhl),
+  .waddr              (waddr_Xhl),
+  .wdata              (vrf_wdata_Xhl),
+
+  .rdata0             (vrfresp_vs1_data_Rhl),
+  .rdata1             (vrfresp_vs2_data_Rhl)
+);
+
+  //-------------------
+  // Decode Stage (D)
+  //-------------------
+
+  // BEGIN MODELING for conference submission
+  // 2 subwords of registers are updated whenever there's a read to vs1
+  wire hold_vs1_subwords_Dhl = vrfreq_val_Fhl && vrfreq_rdy_Fhl && rd_en0;
+  always @(posedge hold_vs1_subwords_Dhl) begin
+    dummy_vs1_holding_Dhl <= {2{vrfresp_vs1_data_Rhl[BISCUIT_P_NBITS-1:0]}};
+  end
+  // 1 subword is read whenever there is a read to vs2
+  wire hold_vs2_subwords_Dhl = vrfreq_val_Fhl && vrfreq_rdy_Fhl && rd_en1;
+  always @(posedge hold_vs1_subwords_Dhl) begin
+    dummy_vs2_holding_Dhl <= vrfresp_vs1_data_Rhl[BISCUIT_P_NBITS-1:0];
+  end
+
+  wire [BISCUIT_P_NBITS-1:0] a_data_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] b_data_Xhl;
+  wire vector_rf_wen_Xhl = waddr_Xhl != 5'b0;
+  biscuit_VectorRegfile vrf_functional
+  (
+    .clk            (clk),
+    .raddr0_Rhl     (rega_addr_Dhl),
+    .roff0_Rhl      (a_subword_idx_Dhl),
+    .rdata0_Xhl     (a_data_Xhl),
+    .raddr1_Rhl     (regb_addr_Dhl),
+    .roff1_Rhl      (b_subword_off_Dhl),
+    .rdata1_Xhl     (b_data_Xhl),
+    .waddr_Xhl      (waddr_Xhl),
+    .wen_Xhl        (vector_rf_wen_Xhl), // addr !=0???
+    .woffset_Xhl    (wb_subword_off_Xhl),
+    .wdata_Xhl      (alu_mux_out_Xhl)
+  );
+
+  // END MODELING
+
+
+
+  reg [31:0] vs1_word_stored_Dhl;
+  reg [31:0] vs2_word_stored_Dhl;
+
+  // Gate Clock
+  wire bypass_to_vs1_Dhl = vrf_wen_Xhl && (vs1_Dhl == waddr_Xhl);
+  wire vrfresp_handshake_Rhl = vrfresp_val_Rhl && vrfresp_rdy_Rhl;
+
+  wire vs1_word_stored_en_Dhl = !(reset || bypass_to_vs1_Dhl || vrfresp_handshake_Rhl);
+  wire vs1_word_stored_clk_gated_Dhl;
+
+  biscuit_ClkEnBuf vs1_word_stored_Dhl_clk_gate
+  (
+    .clk  (vs1_word_stored_clk_gated_Dhl),
+    .rclk (clk),
+    .en_l (vs1_word_stored_en_Dhl)
+  );
+
+  always @ (posedge vs1_word_stored_clk_gated_Dhl) begin
+    if (reset) begin
+      vs1_word_stored_Dhl <= 32'b0;
+    end else if (bypass_to_vs1_Dhl) begin // bypassing takes priority
+      vs1_word_stored_Dhl <= vrf_wdata_Xhl;
+    end else if (vrfresp_handshake_Rhl) begin // rdy won't be high on write to RF.\
+        vs1_word_stored_Dhl <= vrfresp_vs1_data_Rhl;
+    end else begin
+      vs1_word_stored_Dhl <= vs1_word_stored_Dhl;
+    end
+  end
+
+  // Gate Clock
+  wire bypass_to_vs2_Dhl = vrf_wen_Xhl && (vs2_Dhl == waddr_Xhl);
+  wire vs2_word_stored_en_Dhl = !(reset || bypass_to_vs2_Dhl || vrfresp_handshake_Rhl);
+  wire vs2_word_stored_clk_gated_Dhl;
+
+  biscuit_ClkEnBuf vs2_word_stored_Dhl_clk_gate
+  (
+    .clk  (vs2_word_stored_clk_gated_Dhl),
+    .rclk (clk),
+    .en_l (vs2_word_stored_en_Dhl)
+  );
+
+  always @ (posedge vs2_word_stored_clk_gated_Dhl) begin
+    if (reset) begin
+      vs2_word_stored_Dhl <= 32'b0;
+    end else if (vrf_wen_Xhl && (vs2_Dhl == waddr_Xhl)) begin // implement bypassing
+      vs2_word_stored_Dhl <= vrf_wdata_Xhl;
+    end else if (vrfresp_val_Rhl && vrfresp_rdy_Rhl) begin
+      vs2_word_stored_Dhl <= vrfresp_vs2_data_Rhl;
+    end else begin
+      vs2_word_stored_Dhl <= vs2_word_stored_Dhl;
+    end
+  end
+
+  // Implement bypassing
+  wire [31:0] vs1_word_Dhl = (vrf_wen_Xhl && (vs1_Dhl == waddr_Xhl)) ? vrf_wdata_Xhl : vs1_word_stored_Dhl;
+  wire [31:0] vs2_word_Dhl = (vrf_wen_Xhl && (vs2_Dhl == waddr_Xhl)) ? vrf_wdata_Xhl : vs2_word_stored_Dhl;
+
+  // Mux holding registers to feed to X stage
+  localparam REG_RS1 = 2'b00;
+  localparam REG_RS2 = 2'b01;
+  localparam REG_RD  = 2'b10;
+  localparam REG_R0  = 2'b11;
+
+  // reg [BISCUIT_P_NBITS-1:0] a_data_Dhl;
+  // reg [BISCUIT_P_NBITS-1:0] b_data_Dhl;
+
+  // always @ (*) begin
+  //   a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   case (rega_arch_reg_Dhl)
+  //     REG_RS1: a_data_Dhl = vs1_word_Dhl[a_subword_idx_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: a_data_Dhl = vs2_word_Dhl[a_subword_idx_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  a_data_Dhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: a_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+
+  //   case (regb_arch_reg_Dhl)
+  //     REG_RS1: b_data_Dhl = vs1_word_Dhl[b_subword_off_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: b_data_Dhl = vs2_word_Dhl[b_subword_off_Dhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  b_data_Dhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: b_data_Dhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+  // end
+
+  //-------------------
+  // Execute Stage (X)
+  //-------------------
+  // Pipelining to cut critical path
+  // clock gating: use pipelined delay of previous clock gate logic
+  // Naive: have single-cycle delayed signal of the Dhl signal. This is the cost of 2 flops per clk, which is better than 64
+
+  // vvvvvvvvvvv BEGIN HOLDING REGISTERS FOR PIPELINED STUFFVVVVVVVVVVVVVVVVVVV
+  // reg vs1_word_stored_clk_gated_Xhl;
+  // reg vs2_word_stored_clk_gated_Xhl;
+  // always @(posedge clk) begin
+  //   vs1_word_stored_clk_gated_Xhl <= vs1_word_stored_clk_gated_Dhl;
+  //   vs2_word_stored_clk_gated_Xhl <= vs2_word_stored_clk_gated_Dhl;
+  // end
+
+  // reg [31:0] vs1_word_Xhl;
+  // reg [31:0] vs2_word_Xhl;
+  // always @(posedge vs1_word_stored_clk_gated_Xhl) begin
+  //   if (reset) begin
+  //     vs1_word_Xhl <= 32'b0;
+  //   end else begin
+  //     vs1_word_Xhl <= vs1_word_Dhl;
+  //   end
+  // end
+  // always @(posedge vs2_word_stored_clk_gated_Xhl) begin
+  //   if (reset) begin
+  //     vs2_word_Xhl <= 32'b0;
+  //   end else begin
+  //     vs2_word_Xhl <= vs2_word_Dhl;
+  //   end
+  // end
+
+  // reg [BISCUIT_P_NBITS-1:0] a_data_Xhl;
+  // reg [BISCUIT_P_NBITS-1:0] b_data_Xhl;
+  // always @ (*) begin
+  //   a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //   b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //   case (rega_arch_reg_Xhl)
+  //     REG_RS1: a_data_Xhl = vs1_word_Xhl[a_subword_idx_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: a_data_Xhl = vs2_word_Xhl[a_subword_idx_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  a_data_Xhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: a_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+
+  //   case (regb_arch_reg_Xhl)
+  //     REG_RS1: b_data_Xhl = vs1_word_Xhl[b_subword_off_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RS2: b_data_Xhl = vs2_word_Xhl[b_subword_off_Xhl*BISCUIT_P_NBITS +: BISCUIT_P_NBITS];
+  //     REG_RD:  b_data_Xhl = {BISCUIT_P_NBITS{1'b0}}; // TEMP TODO: Remove if not reading RD from RF in for shift insts
+  //     REG_R0:  b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //     default: b_data_Xhl = {BISCUIT_P_NBITS{1'b0}};
+  //   endcase
+  // end
+  // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ END HOLDING REGISTERS FOR PIPELINED STUFF^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+  wire [BISCUIT_P_NBITS-1:0] b_scalar_mux_out_Xhl = v_use_scalar_rs1_Xhl ? scalar_rf_out_rs1_Xhl : b_data_Xhl;
+
+  wire [BISCUIT_P_NBITS-1:0] a_mux_out_Xhl = a_data_Xhl;
+  // TODO: Refactor to scalar lane
+   wire [BISCUIT_P_NBITS-1:0] b_mux_out_Xhl = b_mux_sel_Xhl ? b_scalar_mux_out_Xhl : b_imm_Xhl;
+
+  reg carry_out_reg_Xhl;
+  reg msb_reg_Xhl;
+  // Microcode sets prop_flag_Xhl high if it propagates either the MSB (carry_in_1=1) or carry out (carry_in_1=0)
+  wire cmp_flag_type_Xhl = carry_in_1_Xhl;
+  wire cmp_flag_mux_out_Xhl = cmp_flag_type_Xhl ? msb_reg_Xhl : carry_out_reg_Xhl;
+  // Otherwise, carry-in is set constant. Use that constant.
+  wire carry_in_Xhl = prop_flag_Xhl ? cmp_flag_mux_out_Xhl : carry_in_1_Xhl;
+
+  // ALU
+  wire [BISCUIT_P_NBITS-1:0] sum_out_Xhl;
+  wire carry_out_Xhl;
+  wire a_b_not_eq_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] fn_out_Xhl;
+  reg [BISCUIT_P_NBITS-1:0] adj_sw_sh_reg_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] shift_out_Xhl;
+
+  wire [(2*BISCUIT_P_NBITS)-1:0] mul_out_Xhl;
+
+  biscuit_CoreDpathAlu alu
+  (
+    .reset               (reset),
+    .in_a                (a_mux_out_Xhl),
+    .in_b                (b_mux_out_Xhl),
+    .in_c                (carry_in_Xhl),
+    .addsub_fn           (addsub_fn_Xhl),
+    .logic_fn            (logic_fn_Xhl),
+    .shift_dir           (shift_inst_dir_Xhl),
+    .signed_off_msb      (signed_off_msb_Xhl),
+    .bitwise_subword_sel (a_offset_mux_sel_Xhl),
+    .in_adj_subword      (adj_sw_sh_reg_Xhl),
+    .bitwise_shamt       (bitwise_shamt_Xhl),
+    .shift_out           (shift_out_Xhl),
+    .fn_type             (alu_fn_type_Xhl),
+
+    .sum_out             (sum_out_Xhl),
+    .carry_out           (carry_out_Xhl),
+    .a_b_not_eq          (a_b_not_eq_Xhl),
+    .fn_out              (fn_out_Xhl),
+    .mul_out             (mul_out_Xhl)
+  );
+
+
+  localparam INST_ARITH = 3'b000;
+  localparam INST_JALR  = 3'b011;
+  localparam INST_LOGIC = 3'b001;
+  localparam INST_SHIFT = 3'b010;
+  localparam INST_MUL   = 3'b100;
+  localparam BISCUIT_C_OVRFLOW_NBITS = $clog2(32/BISCUIT_P_NBITS); // Found through algorithm analysis of mul
+  reg [64+BISCUIT_C_OVRFLOW_NBITS-1:0] mul_shift_reg_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] mul_inter_rfwb_out_Xhl;
+
+  always @ (*) begin
+    alu_mux_out_Xhl = sum_out_Xhl;
+    case (alu_fn_type_Xhl)
+      INST_ARITH: alu_mux_out_Xhl = sum_out_Xhl;
+      INST_JALR:  alu_mux_out_Xhl = sum_out_Xhl & {{(BISCUIT_P_NBITS-1){1'b1}}, 1'b0}; // Bitwize and with fffe for jalr.
+      INST_LOGIC: alu_mux_out_Xhl = fn_out_Xhl;
+      INST_SHIFT: alu_mux_out_Xhl = shift_out_Xhl;
+      INST_MUL:   alu_mux_out_Xhl = mul_inter_rfwb_out_Xhl; //mul_shift_reg_Xhl[32-BISCUIT_P_NBITS-1:32-2*BISCUIT_P_NBITS]; // Output least significant subword of mul shift register. TODO: Optimize?
+      default:    alu_mux_out_Xhl = sum_out_Xhl;
+    endcase
+  end
+
+
+// Deseerialization Reg to write to VRF
+//----------------------------------------
+  wire [31:0] deserial_reg_wdata_Xhl;
+  biscuit_DeserializedReg output_holding_reg
+  (
+    .reset           (reset),
+    .clk             (clk),
+    .subword_en_idx  (wb_subword_off_Xhl),
+    .data_in         (alu_mux_out_Xhl),
+
+    .out             (deserial_reg_wdata_Xhl)
+  );
+
+  // least to most significant -> dir = 0.
+  assign vrf_wdata_Xhl = wb_access_dir_Xhl ? {deserial_reg_wdata_Xhl[31:BISCUIT_P_NBITS], alu_mux_out_Xhl} : {alu_mux_out_Xhl, deserial_reg_wdata_Xhl[31-BISCUIT_P_NBITS:0]};
+
+  // Carry-in/out flag register
+  //----------------------------
+  // Used in ADD/SUB ALU operations
+  reg carry_out_reg_Xhl_next;
+  always @ (*)
+  begin
+    carry_out_reg_Xhl_next = carry_out_reg_Xhl;
+    if (reset) begin
+      carry_out_reg_Xhl_next = 1'b0;
+    end else if (flag_reg_en_Xhl) begin
+      carry_out_reg_Xhl_next = carry_out_Xhl;
+    end
+  end
+
+  always @(posedge clk) begin
+    carry_out_reg_Xhl <= carry_out_reg_Xhl_next;
+  end
+
+  // MSB flag register
+  //-------------------
+  // Used for less-than comparisons
+  // Flag is set if A < B
+  // Less than Function: (!(!AB) & SUM) || A!B
+  // They are same sign and Difference produces a negative result || A is negative is B is Positive
+  reg msb_reg_Xhl_next;
+  always @ (*)
+  begin
+    msb_reg_Xhl_next = msb_reg_Xhl;
+    if (reset) begin
+      msb_reg_Xhl_next = 1'b0;
+    end else if (flag_reg_en_Xhl) begin
+      msb_reg_Xhl_next = (!(!a_mux_out_Xhl[BISCUIT_P_NBITS-1] && b_mux_out_Xhl[BISCUIT_P_NBITS-1]) && sum_out_Xhl[BISCUIT_P_NBITS-1]) || (a_mux_out_Xhl[BISCUIT_P_NBITS-1] && !b_mux_out_Xhl[BISCUIT_P_NBITS-1]);
+    end
+  end
+
+  always @(posedge clk) begin
+    msb_reg_Xhl <= msb_reg_Xhl_next;
+  end
+
+  // Adjacent Subword Regiser
+  //--------------------------
+  reg [BISCUIT_P_NBITS-1:0] adj_sw_sh_reg_Xhl_next;
+  always @(*)
+  begin
+    adj_sw_sh_reg_Xhl_next = adj_sw_sh_reg_Xhl;
+    if (reset) begin
+      adj_sw_sh_reg_Xhl_next = {BISCUIT_P_NBITS{1'b0}};
+    end else if (adj_sw_reg_en_Xhl) begin
+      adj_sw_sh_reg_Xhl_next = adj_sw_mux_sel_Xhl ? {BISCUIT_P_NBITS{msb_reg_Xhl}} : a_mux_out_Xhl;
+    end
+  end
+
+  // Gate Clock
+  wire adj_gate_en_Xhl = !(adj_sw_reg_en_Xhl || reset);
+  wire adj_reg_clk_gated_Xhl;
+
+  biscuit_ClkEnBuf adj_reg_clk_gate
+  (
+    .clk  (adj_reg_clk_gated_Xhl),
+    .rclk (clk),
+    .en_l (adj_gate_en_Xhl)
+  );
+
+  always @(posedge adj_reg_clk_gated_Xhl) begin
+    adj_sw_sh_reg_Xhl <= adj_sw_sh_reg_Xhl_next;
+  end
+
+
+  // Multiply Partial Product Shift Register
+  //-----------------------------------------
+  // Shift register computes 2*NBITS+log2(32/NBITS) of addition.
+
+  localparam BISCUIT_C_PART_PROD_SIZE = (BISCUIT_C_OVRFLOW_NBITS + 2*BISCUIT_P_NBITS);
+  localparam BISCUIT_C_MUL_SH_SIZE = BISCUIT_C_OVRFLOW_NBITS + 64;
+  localparam BISCUIT_C_MUL_INTER_SZ = BISCUIT_C_OVRFLOW_NBITS + 32;
+
+  // --- Cut critical path by delaying betwen mul_out and the intermediate register.
+  //     The AC part of MAC occurs in a pseudo X2 stage
+  //     Microcode does not need to change because subword 0 will be ready by at least the previous cycle.
+  //         TODO: Optimize further to reduce MUL micro-op latency? When shifting can we write to the output? no. Because you might overwrite the input.... for now
+  reg [(2*BISCUIT_P_NBITS)-1:0] mul_out_X2hl;      // Cut Critical path
+  reg                           mul_fn_shift_X2hl; // Propagate control signals to cut critical path
+  reg                           mul_fn_add_X2hl;
+  reg [BISCUIT_C_OFFBITS-1:0]   mul_inter_wr_off_X2hl;
+  reg [63:0]                    mul_inter_reg_en_X2hl;
+  reg [BISCUIT_C_MUL_INTER_SZ-1:0] mul_inter_reg_X2hl;
+
+  // Find output to use in MAC
+  wire [BISCUIT_C_MUL_INTER_SZ-1:0] mul_inter_shifted_X2hl = mul_inter_reg_X2hl >> (BISCUIT_P_NBITS * mul_inter_wr_off_X2hl);
+  wire [BISCUIT_C_PART_PROD_SIZE-1:0] partial_product_input_X2hl = mul_inter_shifted_X2hl[BISCUIT_C_PART_PROD_SIZE-1:0] ;
+
+  // Clock gating for mul_out_reg_X2hl
+  wire mul_out_reg_clk_gated_Xhl;
+  wire mul_out_reg_clk_en_Xhl = !(reset || mul_fn_shift_Xhl || mul_fn_add_Xhl);
+  biscuit_ClkEnBuf mul_out_ClkEnGate
+  (
+    .clk  (mul_out_reg_clk_gated_Xhl),
+    .rclk (clk),
+    .en_l (mul_out_reg_clk_en_Xhl)
+  );
+  always @(posedge mul_out_reg_clk_gated_Xhl) begin
+    mul_out_X2hl <= mul_out_Xhl;
+  end
+
+  wire x2_signals_clk_gated_Xhl;
+  wire x2_signals_clk_en_Xhl = !(reset || alu_fn_type_Xhl== INST_MUL);
+  biscuit_ClkEnBuf x2_signals_ClkEnGate
+  (
+    .clk  (x2_signals_clk_gated_Xhl),
+    .rclk (clk),
+    .en_l (x2_signals_clk_en_Xhl)
+  );
+  always @(posedge x2_signals_clk_gated_Xhl) begin
+    mul_fn_shift_X2hl <= mul_fn_shift_Xhl;
+    mul_fn_add_X2hl <= mul_fn_add_Xhl;
+    mul_inter_wr_off_X2hl <= mul_inter_wr_off_Xhl;
+    mul_inter_reg_en_X2hl <= mul_inter_reg_en_Xhl;
+  end
+
+  wire [BISCUIT_C_PART_PROD_SIZE-1:0] partial_product_mac_X2hl = mul_out_X2hl + partial_product_input_X2hl;
+  // wire [BISCUIT_C_PART_PROD_SIZE-1:0] partial_product_mac = mul_out_Xhl + mul_shift_reg_Xhl[BISCUIT_C_MUL_SH_SIZE-1:BISCUIT_C_MUL_SH_SIZE-BISCUIT_C_PART_PROD_SIZE];
+
+  // Shift MAC by appropriate number of bits to update inter reg
+  wire [BISCUIT_C_MUL_INTER_SZ-1:0] mac_inter_shifted_X2hl = partial_product_mac_X2hl << (BISCUIT_P_NBITS * mul_inter_wr_off_X2hl);
+  // Shift intermediate by appropriate number of bits to update writeback reg value
+  // It's okay to use the X2 stage output because the subword is guaranteed to be prepared at least one cycle before it is read
+  assign mul_inter_rfwb_out_Xhl = mul_inter_reg_X2hl >> (BISCUIT_P_NBITS * mul_inter_rfwb_off_Xhl);
+  // Always @ posedge clk, if the inter_reg_enable is high, update it.
+  genvar i;
+  generate
+  for( i = 0; i < BISCUIT_C_MUL_INTER_SZ; i = i + 1)
+  begin: gate_mul_inter
+    wire mul_inter_reg_clk_gated_X2hl;
+    wire my_gated_en_X2hl = !(reset || (last_uop_Xhl && alu_fn_type_Xhl== INST_MUL)|| mul_inter_reg_en_X2hl[i]);
+    biscuit_ClkEnBuf mul_inter_reg_clk_gate
+    (
+      .clk  (mul_inter_reg_clk_gated_X2hl),
+      .rclk (clk),
+      .en_l (my_gated_en_X2hl)
+    );
+    always @(posedge mul_inter_reg_clk_gated_X2hl) begin
+      if (reset || last_uop_Xhl) begin
+        mul_inter_reg_X2hl[i] <= 1'b0;
+      end else if (mul_inter_reg_en_X2hl[i]) begin
+        mul_inter_reg_X2hl[i] <= mac_inter_shifted_X2hl[i];
+      end
+    end
+  end
+  endgenerate
+
+
+  // reg [64+BISCUIT_C_OVRFLOW_NBITS-1:0] mul_shift_reg_Xhl_next;
+  // always @(*)
+  // begin
+  //   if (reset) begin
+  //     mul_shift_reg_Xhl_next = {BISCUIT_C_MUL_SH_SIZE{1'b0}};
+  //   end else if (mul_fn_add_Xhl && !mul_fn_shift_Xhl) begin
+  //     mul_shift_reg_Xhl_next = {partial_product_mac,mul_shift_reg_Xhl[(63-(2*BISCUIT_P_NBITS)):0]};
+  //   end else if (mul_fn_add_Xhl && mul_fn_shift_Xhl) begin
+  //     mul_shift_reg_Xhl_next = {{BISCUIT_P_NBITS{1'b0}}, partial_product_mac,mul_shift_reg_Xhl[(63-(2*BISCUIT_P_NBITS)):BISCUIT_P_NBITS]};
+  //   end else if (!mul_fn_add_Xhl && mul_fn_shift_Xhl) begin
+  //     mul_shift_reg_Xhl_next = {{BISCUIT_P_NBITS{1'b0}},mul_shift_reg_Xhl[BISCUIT_C_MUL_SH_SIZE-1:BISCUIT_P_NBITS]};
+  //   end else begin
+  //     mul_shift_reg_Xhl_next = mul_shift_reg_Xhl;
+  //   end
+  // end
+
+  // // Gate Clock
+  // wire mul_shift_gate_en_Xhl = !(mul_fn_shift_Xhl || mul_fn_add_Xhl || reset); // TODO: set gating conditions
+  // wire mul_shift_reg_clk_gated_Xhl;
+
+  // biscuit_ClkEnBuf mul_shift_reg_clk_gate
+  // (
+  //   .clk  (mul_shift_reg_clk_gated_Xhl),
+  //   .rclk (clk),
+  //   .en_l (mul_shift_gate_en_Xhl)
+  // );
+
+
+  // always @(posedge mul_shift_reg_clk_gated_Xhl) begin
+  //   if (reset) begin
+  //     mul_shift_reg_Xhl <= {BISCUIT_C_MUL_SH_SIZE{1'b0}};
+  //   end else begin
+  //     mul_shift_reg_Xhl <= mul_shift_reg_Xhl_next;
+  //   end
+  // end
+
+
+
+endmodule
+`endif

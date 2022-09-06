@@ -1,0 +1,1736 @@
+
+`ifndef BISCUIT_CTRL_V
+`define BISCUIT_CTRL_V
+
+`include "tinyrv2-InstMsg.v"
+
+<%
+import os
+import sys
+sys.path.append(os.getcwd())
+
+from pyhplib import *
+#import param_microcode as mc
+%>
+
+module biscuit_Ctrl
+(
+
+  input        clk,
+  input        reset,
+  input        biscuit_csr_int,
+  input        biscuit_int,
+
+  output       imemreq_val,
+  input        imemreq_rdy,
+  input [31:0] imemresp_msg_data,
+  input        imemresp_val,
+  output       imemresp_rdy,
+
+  // Data Memory Port
+  output       dmemreq_msg_rw,
+  output [1:0] dmemreq_msg_len,
+  output       dmemreq_signed,
+  output reg   dmemreq_val,
+  input        dmemreq_rdy,
+  input        dmemresp_val,
+  output       dmemresp_rdy,
+
+  output       vector_memop_Xhl,
+  output       spmemreq_rw,
+  output       spmemreq_val,
+  input        spmemreq_rdy,
+  output reg   sp_handshake_prev,
+
+  output reg   csr_read_en_Xhl,
+  output reg   csr_write_en_Xhl,
+  input        csr_ext_mem_mode,
+
+  // ctrl -> dpath
+  // --------------
+  output reg [31:0] ir_Fhl,
+  output reg [31:0] ir_Xhl,
+  output            new_rfreq_Fhl,
+  output            accept_new_inst_Dhl,
+  output reg        pc_mux_sel_Xhl,
+  output reg        pc_plus4_mux_sel_Xhl,
+
+  // Register File Interfaces
+  output [4:0]      rega_addr_Dhl, // TEMP: Remove once vrf is no longer serialized
+  output [4:0]      regb_addr_Dhl, // TEMP: Remove once vrf is no longer serialized
+  output            rfreq_val_Fhl,
+  input             rfreq_rdy_Fhl,
+  input             rfresp_val_Rhl,
+  output            rfresp_rdy_Rhl,
+  output            rd_en0,
+  output     [4:0]  rs1_addr_Fhl,
+  output            rd_en1,
+  output     [4:0]  rs2_addr_Fhl,
+  output     [4:0]  rs1_Dhl,
+  output     [4:0]  rs2_Dhl,
+  output     [4:0]  rd_Dhl,
+  output     [4:0]  rs1_Xhl,
+
+
+  output reg [4:0]  wb_addr_Xhl,
+  output reg        wb_en_Xhl,
+  output reg        wb_access_dir_Xhl,
+  output reg        v_wb_en_Xhl,
+  output reg        vm_reg_en_Xhl,
+  output            masking_en_Xhl,
+  output reg        sp_subword_incr_Xhl,
+  output reg        wb_to_addr_Xhl,
+  output reg        wb_to_data_Xhl,
+
+  // ALU Inputs
+  output reg        shamt_reg_en_Xhl,
+  output            shamt_mux_sel_Xhl,
+  output reg        adj_sw_mux_sel_Xhl,
+  output reg        adj_sw_reg_en_Xhl,
+  output            a_offset_mux_sel_Dhl,
+  output reg        a_offset_mux_sel_Xhl,
+
+  output     [4:0]  shamt_imm_Xhl,
+  output            shift_inst_dir_Xhl,
+  output reg        a_rd_tmp_Xhl,
+  output reg        a_mux_sel_Xhl,
+<%
+print('  output reg ['+str(BISCUIT_P_NBITS-1)+':0]  b_imm_Xhl,')
+%>
+  output reg        b_mux_sel_Xhl,
+
+<%
+print('  output     ['+str(BISCUIT_C_OFFBITS-1)+':0]  a_subword_off_Dhl,')
+print('  output     ['+str(BISCUIT_C_OFFBITS-1)+':0]  b_subword_off_Dhl,')
+print('  output reg ['+str(BISCUIT_C_OFFBITS-1)+':0]  wb_subword_off_Xhl,')
+%>
+
+  output reg        addsub_fn_Xhl,
+  output reg [1:0]  logic_fn_Xhl,
+  output reg [2:0]  alu_fn_type_Xhl,
+  output reg        mul_fn_add_Xhl,
+  output reg        mul_fn_shift_Xhl,
+<%
+print('  output reg ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_wr_off_Xhl,')
+print('  output reg ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_rfwb_off_Xhl,')
+%>
+  output     [63:0] mul_inter_reg_en_Xhl, // TEMP size, can be optimized
+
+  output reg        prop_flag_Xhl,
+  output reg        carry_in_1_Xhl,
+  output reg        flag_reg_en_Xhl,
+  output reg        addr_shift_dir_sel_Xhl,
+  output reg        addr_reg_en_Xhl,
+  output reg        last_uop_Xhl,
+  output reg        br_reg_en_Xhl,
+  output     [2:0]  br_type_Xhl,
+
+  input             branch_taken_Xhl,
+  input             b_use_imm_reg_Xhl,
+  input      [31:0] proc2cop_data_Xhl,
+
+  output reg        vl_reg_en_Xhl,
+
+  output reg [31:0] cp0_status
+
+);
+
+<%
+print('  localparam BISCUIT_P_NLANES = '+str(BISCUIT_P_NLANES)+';')
+print('  localparam BISCUIT_C_OFFBITS = '+BISCUIT_C_OFFBITS_STR+';')
+%>
+
+
+  //-------------------------
+  // Instruction Valid Logic
+  //-------------------------
+  //
+
+  // F: valid when memresp high until when rfreq transaction
+  assign new_rfreq_Fhl = rfreq_val_Fhl && rfreq_rdy_Fhl;
+  wire is_jump_inst_type_Xhl = (ir_Xhl[6:0] == 7'b1101111) || (ir_Xhl[6:0] == 7'b1100111);
+  wire jump_taken_Xhl = is_jump_inst_type_Xhl && last_uop_Xhl;
+  wire is_branch_inst_type_Xhl = ir_Xhl[6:0] == 7'b1100011;
+  wire branch_occurs_Xhl = is_branch_inst_type_Xhl && last_uop_Xhl && b_use_imm_reg_Xhl;
+  wire ctrl_flow_change_Xhl = jump_taken_Xhl || branch_occurs_Xhl;
+  reg inst_val_Fhl;
+  always @ (posedge clk) begin
+    if (reset || ctrl_flow_change_Xhl) begin
+      inst_val_Fhl <= 1'b0;
+    end else begin
+      if (imemresp_val && imemresp_rdy) begin
+        inst_val_Fhl <= 1'b1;
+      end else if (new_rfreq_Fhl) begin
+        inst_val_Fhl <= 1'b0;
+      end else begin
+        inst_val_Fhl <= inst_val_Fhl;
+      end
+    end
+  end
+
+  // R: valid from rfreq transaction until d transaction
+  reg inst_val_Rhl;
+  always @ (posedge clk) begin
+    if (reset || ctrl_flow_change_Xhl) begin
+      inst_val_Rhl <= 1'b0;
+    end else begin
+      if (rfreq_val_Fhl && rfreq_rdy_Fhl) begin
+        inst_val_Rhl <= 1'b1;
+      end else if (rfresp_val_Rhl && rfresp_rdy_Rhl) begin
+        inst_val_Rhl <= 1'b0;
+      end else begin
+        inst_val_Rhl <= inst_val_Rhl;
+      end
+    end
+  end
+
+  // D: Valid from D transaction until last_uop_Dhl
+  wire ready_Dhl;
+  wire last_uop_Dhl;
+  wire instr_leaves_Dhl; // When an instruction finally leaves D stage
+  reg inst_val_Dhl;
+  always @ (posedge clk) begin
+    if (reset || ctrl_flow_change_Xhl) begin
+      inst_val_Dhl <= 1'b0;
+    end else begin
+      if (rfresp_val_Rhl && rfresp_rdy_Rhl && inst_val_Rhl) begin // allow for flushes of RF when squashing.
+        inst_val_Dhl <= 1'b1;
+      end else if (instr_leaves_Dhl) begin
+        inst_val_Dhl <= 1'b0;
+      end else begin
+        inst_val_Dhl <= inst_val_Dhl;
+      end
+    end
+  end
+
+  // X: Just simple pipeline of Dhl's valid signal
+  reg inst_val_Xhl;
+  always @ (posedge clk) begin
+    if (reset|| ctrl_flow_change_Xhl) begin
+      inst_val_Xhl <= 1'b0;
+    end else begin
+      inst_val_Xhl <= inst_val_Dhl;
+    end
+  end
+
+  //--------------
+  // Stall Logic
+  //--------------
+  reg dmemreq_pending_next;
+  reg spmemreq_pending_next;
+  wire stall_memreq = dmemreq_pending_next || spmemreq_pending_next;
+
+  wire stall_Xhl = stall_memreq; // Pause processor on memory request, including early pipeline stages.
+  wire stall_Dhl = stall_Xhl; //  D can always flush its contents to X when !mem_stall
+  wire stall_Rhl = stall_Dhl &&  inst_val_Rhl && rfresp_val_Rhl; // Only stall R when it is done processing a valid instruction and D is not ready to accept it.
+  wire stall_Fhl = stall_Rhl; // TODO: Only stall the F stage when the R stage is stalled. Everything is ready to move on, but can't. 
+                              // Note: This is not the logic to pause fetching a new instruction or whether to pass an instruction from F->R
+
+  // ------------------------
+  // Fetch Stage
+  // ------------------------
+  reg new_instr_req_Fhl;
+  reg instr_req_pending_Fhl;
+  wire squash_all = ctrl_flow_change_Xhl;
+  assign imemreq_val = new_instr_req_Fhl & !squash_all;
+  assign imemresp_rdy = instr_req_pending_Fhl;
+
+  // Indicate when a new instruction fetch is being handled by the instruction memory.
+  reg instr_req_pending_Fhl_next;
+  always @(*) begin
+    instr_req_pending_Fhl_next = instr_req_pending_Fhl;
+    if (imemresp_val && imemresp_rdy) begin
+      instr_req_pending_Fhl_next = 1'b0;
+    end else if (imemreq_val && imemreq_rdy) begin
+      instr_req_pending_Fhl_next = 1'b1;
+    end
+  end
+
+  // Update IR when imem responds with a valid instruction
+
+  reg [31:0] ir_next_Fhl;
+  // reg [31:0] ir_Fhl;
+  always @(*)
+  begin
+    ir_next_Fhl = ir_Fhl;
+    if (squash_all) begin
+        ir_next_Fhl = 32'b0;
+    end else if (imemresp_val && imemresp_rdy) begin
+      ir_next_Fhl = imemresp_msg_data;
+    end
+  end
+
+  // Indicate when to fetch the next instruction
+  // Must be R has no valid instruction or it does and a new instruction is being accepted into D
+  // or when an external signal says to start fetching instructions.
+  // This signal is high once per new instruction that needs to be fetched.
+  // We can't assume that the memory response will return within finite time, but we should only have one instruction fetch be sent once per cycle.
+  // Because of this imemreq, should only be high once per instruction.
+  // What we're seeing is it's high because !inst_val_Fhl for multiple cycles.
+  // We only calculate a new PC when we accept an instruction into Dhl.
+  //
+  // At any point in time, we need to be able to reset everything when there is a squash request
+  reg rf_prev_accept_Fhl;
+  always @(posedge clk) begin
+    if (reset) begin
+      rf_prev_accept_Fhl <= 1'b0;
+    end else begin
+      rf_prev_accept_Fhl <= rfreq_val_Fhl &&rfreq_rdy_Fhl;
+    end
+  end
+  wire rf_accept_Fhl = rfreq_val_Fhl &&rfreq_rdy_Fhl;
+
+  reg new_instr_req_next_Fhl;
+  always @(*)
+  begin
+    new_instr_req_next_Fhl = new_instr_req_Fhl;
+    if ((imemreq_val && imemreq_rdy)) begin
+      new_instr_req_next_Fhl = 1'b0;
+    end else if (rf_accept_Fhl
+             || (inst_val_Rhl && accept_new_inst_Dhl)
+             || biscuit_int
+             || biscuit_csr_int
+             || (last_uop_Xhl && pc_mux_sel_Xhl)) //brj taken
+    begin
+      new_instr_req_next_Fhl = 1'b1;
+    end
+  end
+
+  always @(posedge clk) begin
+    if (reset) begin
+      // Upon a reset, prepare to request a new instruction
+      new_instr_req_Fhl <= 1'b1;
+      instr_req_pending_Fhl <= 1'b0;
+      ir_Fhl <= 32'b0;
+    end else begin
+      // Update sequential state
+      new_instr_req_Fhl <= new_instr_req_next_Fhl;
+      instr_req_pending_Fhl <= instr_req_pending_Fhl_next;
+      ir_Fhl <= ir_next_Fhl;
+    end
+  end
+
+  // RISCV Architectural Registers
+  wire [4:0]  rs1_Fhl;
+  wire [4:0]  rs2_Fhl;
+  wire [4:0]  rd_Fhl;
+
+
+  assign rs1_addr_Fhl = ir_Fhl[19:15];
+  assign rs2_addr_Fhl = ir_Fhl[24:20];
+  assign rd_Fhl  = ir_Fhl[11:7];
+
+  assign rd_en0 = |rs1_addr_Fhl;
+  assign rd_en1 = |rs2_addr_Fhl;
+
+  //----------------------
+  // Register Read Stage
+  //----------------------
+  // Take most recent PC fetched and over 2 cycles, read the values from rs1 and rs2
+  // These values are passed D stage directly from the RF using val/rdy when the previous instruction finishes execution
+
+  // NOTE: This needs to change for 16-bit biscuit which asumes multiple ports or banking or extra cycle.
+
+  //rfreq_val_Fhl is high when there's a valid instruction in the F stage.
+  assign rfreq_val_Fhl = inst_val_Fhl;
+  //rfresp_rdy_Rhl is high when the D stage is ready to take in a new instruction.
+  assign rfresp_rdy_Rhl = ready_Dhl;
+
+  // Accept a new IR whenever there is a new  transaction sent to the RF to be read.
+  reg [31:0] ir_Rhl;
+
+  always @ (posedge clk) begin
+    if (reset || squash_all) begin
+      ir_Rhl <= 32'b0;
+    end else if (rfreq_val_Fhl && rfreq_rdy_Fhl) begin
+      ir_Rhl <= ir_Fhl;
+    end else begin
+      ir_Rhl <= ir_Rhl;
+    end
+  end
+
+  wire [4:0]  rs1_Rhl =  ir_Rhl[19:15];
+  wire [4:0]  rs2_Rhl = ir_Rhl[24:20];
+  wire [4:0]  rd_Rhl = ir_Rhl[11:7];
+
+  //---------------------------
+  // Decode Stage
+  //---------------------------
+
+  // R->D
+  //-------
+  reg [31:0] ir_Dhl;
+  always @(posedge clk) begin
+    if (reset || ctrl_flow_change_Xhl) begin
+      ir_Dhl <= 32'b0;
+    end else if(accept_new_inst_Dhl) begin
+      ir_Dhl <= ir_Rhl;
+    end
+  end
+
+  wire [4:0]  rs1 = ir_Dhl[19:15];
+  wire [4:0]  rs2 = ir_Dhl[24:20];
+  wire [4:0]  rd = ir_Dhl[11:7];
+  assign rs1_Dhl = rs1;
+  assign rs2_Dhl = rs2;
+  assign rd_Dhl = rd;
+
+  // Set up micr-op repeat logic
+  reg [4:0] repeat_ctr_reg_Dhl;
+  reg [9:0] uop_idx_Dhl;
+  reg first_cycle_of_uop_Dhl;
+  wire [4:0]  uop_repeat_Dhl;
+
+  wire [4:0] repeat_mux_out_Dhl = first_cycle_of_uop_Dhl ? uop_repeat_Dhl : (repeat_ctr_reg_Dhl - 1);
+  wire repeat_ctr_reg_en_Dhl = (first_cycle_of_uop_Dhl || (repeat_ctr_reg_Dhl != 5'b0));
+  wire [4:0] repeat_ctr_next_Dhl = repeat_ctr_reg_en_Dhl ? repeat_mux_out_Dhl : repeat_ctr_reg_Dhl;
+
+  // Update uop index on a new valid instruction reaching D stage fetch or when repeat counter hits 0.
+  // This happens when !inst_val_Dhl || ((ir_Dhl != ir_Rhl) && inst_val_Rhl && done_fetch_Rhl)
+  reg [9:0] uop_idx_next_Dhl;
+  wire done_fetch_Rhl = rfresp_val_Rhl;
+
+
+  // X stage is always ready whenever not stalled for a memory access.
+  assign instr_leaves_Dhl = !stall_Dhl && last_uop_Dhl; // When an instruction finally leaves D stage
+  assign ready_Dhl = !inst_val_Dhl || instr_leaves_Dhl ;
+  assign accept_new_inst_Dhl = ready_Dhl && inst_val_Rhl && done_fetch_Rhl && !stall_Dhl;
+
+  always @(*) begin
+    uop_idx_next_Dhl = uop_idx_Dhl;
+    if (accept_new_inst_Dhl) begin
+      uop_idx_next_Dhl = 10'b0;
+    end
+    else if (instr_leaves_Dhl || ctrl_flow_change_Xhl) begin
+      // Set to all 1's after last uop gets sent to X stage
+      // Also reset uop when squashed
+      uop_idx_next_Dhl = 10'h3ff;
+    end
+    else if (repeat_mux_out_Dhl == 5'b0 && !stall_memreq) begin
+      uop_idx_next_Dhl = uop_idx_Dhl + 10'b1;
+    end
+  end
+
+  // Indicate first cycle of a (possibly) repeated uop
+  // This is when there's a newly-fetched instruction or the uop repeat counter hits 0
+  reg first_cycle_of_uop_Dhl_next;
+  always @(*)
+  begin
+    first_cycle_of_uop_Dhl_next = first_cycle_of_uop_Dhl;
+    if (rfresp_val_Rhl && rfresp_rdy_Rhl && inst_val_Rhl) begin // pjjTODO: Fix to be when advancing prior instruction
+      first_cycle_of_uop_Dhl_next = 1'b1;
+    end else if (stall_memreq) begin
+      first_cycle_of_uop_Dhl_next = first_cycle_of_uop_Dhl;
+    end else begin
+      first_cycle_of_uop_Dhl_next = (repeat_mux_out_Dhl == 5'b0);
+    end
+  end
+
+  always @(posedge clk) begin
+    if (reset) begin
+      uop_idx_Dhl <= 10'b0;
+      first_cycle_of_uop_Dhl <= 1'b0;
+      repeat_ctr_reg_Dhl <= 5'b0;
+    end else begin
+      uop_idx_Dhl <= uop_idx_next_Dhl;
+      first_cycle_of_uop_Dhl <= first_cycle_of_uop_Dhl_next;
+      repeat_ctr_reg_Dhl <= repeat_ctr_next_Dhl;
+    end
+  end
+
+
+
+  // Control Signal Table
+  //======================
+
+<%
+print('  localparam cs_sz        = '+str(BISCUIT_N_CTRL_SIGNALS + (3 * BISCUIT_C_OFFBITS))+';')
+%>
+  localparam rep_const    = 2'b00; // Repeat uop as defined in microcode
+  localparam rep_reg      = 2'b01; // Repeat uop as defined in temp_reg[5:0] for register-based shifts
+  localparam rep_imm      = 2'b10; // Repeat uop as defined in shamt section of IR for imm. shifts
+
+  localparam csr_x        = 2'b00;
+  localparam csr_r        = 2'b01;
+  localparam csr_w        = 2'b10;
+
+  localparam pc_x         = 1'b0;   //x;
+  localparam pc_n         = 1'b0;   // Indicate take next PC (= PC+4)
+  localparam pc_b         = 1'b1;   // Indicate to take calculated PC (shift register) if a branch is taken
+
+  localparam am_r         = 2'b00;  // Indicate to use A as input
+  localparam am_p         = 2'b01;  // Indicate to use PC as the A input
+  localparam am_pcp       = 2'b11;  // Indicate to use PC+4 as A input
+
+  localparam dir_l2m      = 1'b0;   // Access words from LSB to MSB
+  localparam dir_m2l      = 1'b1;   // Access words from MSB to LSB
+  localparam dir_x        = 1'b0;   // Default (x)
+
+  localparam rf_seq_rd    = 1'b1;
+  localparam rf_static    = 1'b0;
+  localparam rf_x         = 1'b1;   // Default (x)
+
+  localparam addr_x       = 5'b0;   // Invalid register address; default to 0
+  localparam r0           = 5'h0;
+  localparam r31          = 5'h1f;
+  localparam n            = 1'b0;
+  localparam y            = 1'b1;
+
+  localparam immed_type_i = 3'b000;
+  localparam immed_type_s = 3'b001;
+  localparam immed_type_b = 3'b010;
+  localparam immed_type_u = 3'b011;
+  localparam immed_type_j = 3'b100;
+  localparam immed_type_x = 3'b111;  // Does not correspond to a particular type
+
+  localparam b_imm_shft   = 1'b0;
+  localparam b_imm_load   = 1'b1;
+  localparam b_imm_x      = 1'b0;    //x;
+  localparam bm_imm       = 1'b0;
+
+  localparam bm_reg       = 1'b1;
+
+  localparam fn_add       = 1'b0;
+  localparam fn_sub       = 1'b1;
+  localparam fn_and       = 2'b11;
+  localparam fn_or        = 2'b10;
+  localparam fn_a_nb      = 2'b01;
+  localparam fn_xor       = 2'b00;
+  localparam fn_shift_zero= 2'b00;
+
+  localparam mul_x        = 2'b00;
+  localparam mul_add      = 2'b01;
+  localparam mul_shft     = 2'b10;
+  localparam mul_adsh     = 2'b11; // add and shift
+
+  localparam adj_x        = 1'b0;
+  localparam adj_subw     = 1'b0;
+  localparam adj_sext     = 1'b1;
+
+  localparam fn_sxl       = 2'b01; // Logical shift
+  localparam fn_sxa       = 2'b11; // Arithmetic shift
+
+  localparam carry_msb    = 2'b11; // Propagate old MSB to new carry-in signal
+  localparam carry_prop   = 2'b10; // Propagate old carry out to new carry in
+  localparam carry_in_1   = 2'b01; // Set carry in of Addsub to 1
+  localparam carry_in_0   = 2'b00; // Set carry in of addsub to 0
+
+  localparam fn_type_arith= 3'b000;
+  localparam fn_type_jalr = 3'b011; // Corner case for & fffe for JARL sum
+  localparam fn_type_logic= 3'b001;
+  localparam fn_type_shift= 3'b010;
+  localparam fn_type_mul  = 3'b100;
+  localparam fn_type_x    = 3'b000; //x;
+
+  localparam fn_x         = 8'b0;  //x;
+  localparam fn_zero      = 8'b0;
+  localparam shift_left   = 1'b0;
+  localparam shift_right  = 1'b1;
+  localparam zero         = 1'b0;
+
+  wire [cs_sz-1:0] lui_microcode[2:0];
+
+<%
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+opidx = mc.gen_lines( opidx,                 0,'lui_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'u',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'lui_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'u',     True,    'shft',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'lui_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'u',     True,    'shft',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,     True)
+%>
+
+  wire [cs_sz-1:0] auipc_microcode[2:0];
+
+<%
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+opidx = mc.gen_lines( opidx,                 0,'auipc_microcode', False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'u',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'auipc_microcode', False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'u',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'auipc_microcode', False,    'x',        'n',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'u',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+  wire [cs_sz-1:0] jal_microcode[4:0];
+<%
+opidx = 0
+#//                                                            cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// JAL sets LSB to 0
+#// R[rd] = PC + 4;
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'jal_microcode',  False,    'x',        'x',     'pcp',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'jal_microcode',  False,    'x',        'x',     'pcp',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// PC = ( R[rs1] + sext(imm) ) & 0xfffffffe
+opidx = mc.gen_lines( opidx,                 0,'jal_microcode',  False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'j',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x',  'jalr',  True,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'jal_microcode',  False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'j',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'jal_microcode',  False,    'x',        'b',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'j',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,     True)
+%>
+
+
+  wire [cs_sz-1:0] jalr_microcode[4:0];
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// JALR sets LSB to 0
+#// R[rd] = PC + 4;
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'jalr_microcode',  False,    'x',        'x',     'pcp',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'jalr_microcode',  False,    'x',        'x',     'pcp',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// PC = ( R[rs1] + sext(imm) ) & 0xfffffffe
+opidx = mc.gen_lines( opidx,                 0,'jalr_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x',  'jalr',  True,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'jalr_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'jalr_microcode',  False,    'x',        'b',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,     True)
+%>
+
+wire [cs_sz-1:0] bne_microcode[5:0];
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+# // Compare inputs. Propagate |(A[i]^B[i])
+opidx = mc.gen_lines( opidx,                 0,'bne_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',       True,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'bne_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',       True,       'x',   'prop',    'xor',    'x',     'x',  False,        'x', 'logic',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'bne_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',       True,       'x',   'prop',    'xor',    'x',     'x',  False,        'x', 'logic',  True,      'x',   False,      True,    False)
+# // Add appropriate offset to PC to get correct result.
+opidx = mc.gen_lines( opidx,                 0,'bne_microcode',   False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'b',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'bne_microcode',   False,    'x',        'x',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'b',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,    False)
+# // Load the result into the next PC
+opidx = mc.gen_lines( opidx,                 0,'bne_microcode',   False,    'x',        'b',       'p',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'b',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,  'right',    True,     False,     True)
+%>
+
+  wire [cs_sz-1:0] addi_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'addi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'addi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'addi_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] xori_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'xori_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'xori_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'xori_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+
+ wire [cs_sz-1:0] ori_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'ori_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'ori_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'ori_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] andi_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'andi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'andi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs1',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'andi_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs1',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+  wire [cs_sz-1:0] add_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'add_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'add_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'add_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+
+  wire [cs_sz-1:0] sub_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'sub_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',      '1',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'sub_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'sub_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+
+  wire [cs_sz-1:0] slt_microcode[5:0];
+
+<%
+opidx = 0
+#// Perform subtraction. Make sure the last computation enables the flag register
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'slt_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',      '1',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'slt_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slt_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// Then add 0 + 0 + MSB(old) to output register
+opidx = mc.gen_lines( opidx,                 0,'slt_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',    'msb',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'slt_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slt_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,     True)
+
+%>
+
+
+ wire [cs_sz-1:0] slti_microcode[5:0];
+
+<%
+opidx = 0
+#// Perform subtraction. Make sure the last computation enables the flag register
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'slti_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'sub',      '1',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'slti_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slti_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'sub',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// Then add 0 + 0 + MSB(old) to output register
+opidx = mc.gen_lines( opidx,                 0,'slti_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',    'msb',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'slti_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slti_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,     True)
+
+%>
+
+ wire [cs_sz-1:0] xor_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'xor_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'xor_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'xor_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+
+ wire [cs_sz-1:0] or_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'or_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', 'rs1',   'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'or_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', 'rs1',   'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'or_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', 'rs1',   'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] and_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'and_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'and_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'and_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+
+
+
+
+wire [cs_sz-1:0] csrw_microcode[1:0];
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrw_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,  'right',    True,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'csrw_microcode',   True,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,  'right',    True,     False,     True)
+%>
+
+`ifdef BISCUIT_VECTOR_SHIFT
+wire [cs_sz-1:0] srai_microcode[7:0];
+<%
+opidx = 0
+#// TODO: Account for when RS1 and RD are the same
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Set the MSB flag to be MSB of input //TODO: Optimize this away
+opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs1',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to sext(in) and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'sext',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+#//opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'srai_microcode',  False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'srai_microcode',  False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] srli_microcode[7:0];
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'srli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to 0 and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'srli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'srli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'srli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+#//opidx = mc.gen_lines( opidx,                 0,'srli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'srli_microcode',  False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'srli_microcode',  False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] slli_microcode[7:0];
+<%
+opidx = 0
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'slli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to 0 and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'slli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'slli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+#//opidx = mc.gen_lines( opidx,                 0,'slli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'slli_microcode',  False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'slli_microcode',  False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+`endif
+
+
+
+<%
+print('wire [cs_sz-1:0] load_microcode['+str(4+int(BISCUIT_C_N_OFF-1))+':0];')
+#//                                                               cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+#// Calculate Address
+opidx = mc.gen_lines( opidx,                 0,'load_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'load_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Send First Request
+opidx = mc.gen_lines( opidx,                 0,'load_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+for i in range(BISCUIT_C_N_OFF-1):
+  #// Increment address and send request for next subword
+  opidx = mc.gen_lines( opidx,               0,'load_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Final subword is written in response to final request. Indicate done.
+opidx = mc.gen_lines( opidx,                 0,'load_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+<%
+print('wire [cs_sz-1:0] store_microcode['+str(4+int(BISCUIT_C_N_OFF-1))+':0];')
+#//                                                                cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+#// Calculate Address
+opidx = mc.gen_lines( opidx,                 0,'store_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        's',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'store_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        's',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Send First Request
+opidx = mc.gen_lines( opidx,                 0,'store_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+for i in range(BISCUIT_C_N_OFF-1):
+  #// Increment address and send request for next subword
+  opidx = mc.gen_lines( opidx,               0,'store_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Final subword is written in response to final request. Indicate done.
+opidx = mc.gen_lines( opidx,                 0,'store_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+// All loads perform same microcode. Memory response is masked/sign extended in scalar datapath
+wire [cs_sz-1:0] exload_microcode[7:0];
+<%
+opidx = 0
+#//                                                                 cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Calculate Address
+opidx = mc.gen_lines( opidx,                 0,'exload_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'exload_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'exload_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',    True, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Handle response from Mem
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'exload_microcode',    False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'exload_microcode',    False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+// All stores perform same microcode. Memory request length is set in memreq_msg_len. Lowest (byte, halfword) alraedy set properly by sw microcode
+wire [cs_sz-1:0] exstore_microcode[7:0];
+<%
+opidx = 0
+#//                                                                  cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Calculate Address
+opidx = mc.gen_lines( opidx,                 0,'exstore_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        's',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'exstore_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        's',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'exstore_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        's',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Deserialize data to be stored
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'exstore_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'exstore_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',     'x',    True, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Handle response from Mem
+opidx = mc.gen_lines( opidx,                 0,'exstore_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+wire [cs_sz-1:0] csrrw_microcode[6:0];
+<%
+opidx = 0
+#//                                                                 cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Calculate Address of CSR from immediate value
+opidx = mc.gen_lines( opidx,                 0,'csrrw_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrw_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// load the current CSR value into csr holding register
+opidx = mc.gen_lines( opidx,                 0,'csrrw_microcode',     False,    'r',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Deserialize rs1 into the mem_data_reg
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'csrrw_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Write the CSR
+opidx = mc.gen_lines( opidx,                 0,'csrrw_microcode',      True,    'w',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Write rd
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrw_microcode',     False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'csrrw_microcode',     False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,     True)
+%>
+
+wire [cs_sz-1:0] csrrs_microcode[6:0];
+<%
+opidx = 0
+#//                                                                 cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Calculate Address of CSR from immediate value
+opidx = mc.gen_lines( opidx,                 0,'csrrs_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrs_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// load the current CSR value into csr holding register
+opidx = mc.gen_lines( opidx,                 0,'csrrs_microcode',     False,    'r',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Deserialize rs1 into the mem_data_reg
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'csrrs_microcode',     False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',  'rs1',     'x',   False, False,     False,      False,      True,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,       'x',  False,     False,    False)
+#// Write the CSR
+opidx = mc.gen_lines( opidx,                 0,'csrrs_microcode',     False,    'w',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Write rd
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrs_microcode',     False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'csrrs_microcode',     False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,     True)
+%>
+
+wire [cs_sz-1:0] csrrc_microcode[6:0];
+<%
+opidx = 0
+#//                                                                 cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Calculate Address of CSR from immediate value
+opidx = mc.gen_lines( opidx,                 0,'csrrc_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrc_microcode',     False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// load the current CSR value into csr holding register
+opidx = mc.gen_lines( opidx,                 0,'csrrc_microcode',     False,    'r',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Deserialize rs1 into the mem_data_reg
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'csrrc_microcode',     False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',  'rs1',     'x',   False, False,     False,      False,      True,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',   'a_nb',    'x',     'x',  False,        'x', 'logic', False,       'x',  False,     False,    False)
+#// Write the CSR
+opidx = mc.gen_lines( opidx,                 0,'csrrc_microcode',     False,    'w',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',      False,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+#// Write rd
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'csrrc_microcode',     False,    'x',        'x',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'csrrc_microcode',     False,    'x',        'n',       'r',     True,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,       'x',  False,     False,     True)
+%>
+
+
+//-------------------------
+// RISC-V Vector Extension
+//-------------------------
+wire [cs_sz-1:0] vsetvli_microcode[4:0];
+
+<%
+
+#//                                                                 cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+#// 1. Read the value from rs1 and store it into the temp register using wb_addr. This holds the AVL. We don't know the AVL until it's completely loaded.
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'vsetvli_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',    'rd',   False, False,      True,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,    False)
+#// 2. Have the AVL get converted to vl and stored in the vl register and the temporary value register in the scalar datapath.
+opidx = mc.gen_lines( opidx,                 0,'vsetvli_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,      True,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,    False)
+#// 3. Use the mem_data/temp_value register to input the data and write to rd
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vsetvli_microcode',   False,    'x',        'x',       'r',    True,  'seq_rd',        '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vsetvli_microcode',   False,    'x',        'n',       'r',    True,  'seq_rd',        '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,        'x', False,     False,     True)
+%>
+
+<%
+print('wire [cs_sz-1:0] vle32_v_microcode['+str(3+int(BISCUIT_C_N_OFF-1))+':0];')
+#//                                                                  cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+#// Load address into addr register
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'vle32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Send First Request
+opidx = mc.gen_lines( opidx,                 0,'vle32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+for i in range(BISCUIT_C_N_OFF-1):
+  #// Increment address and send request for next subword
+  #// Set rd to correct value so that SP knows where to put data on the cycle after the handshake
+  opidx = mc.gen_lines( opidx,               0,'vle32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Final subword is written in response to final request. Indicate done.
+opidx = mc.gen_lines( opidx,                 0,'vle32_v_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+<%
+print('wire [cs_sz-1:0] vse32_v_microcode['+str(3+int(BISCUIT_C_N_OFF-1))+':0];')
+#//                                                                  cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = 0
+#// Load address into addr register
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-1,'vse32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',    'x',     'x',   False, False,      True,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Send First Request
+opidx = mc.gen_lines( opidx,                 0,'vse32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'rd',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+for i in range(BISCUIT_C_N_OFF-1):
+  #// Increment address and send request for next subword
+  opidx = mc.gen_lines( opidx,               0,'vse32_v_microcode',    False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'rd',    'x',     'x',    True, False,     False,       True,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+#// Final subword is written in response to final request. Indicate done.
+opidx = mc.gen_lines( opidx,                 0,'vse32_v_microcode',    False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+// Need a separate vector microcode because scalar does operand A=rs1 but VI does A=vs2
+  wire [cs_sz-1:0] vaddi_microcode[2:0];
+// Note: immediate type doesn't matter as it is overridden in the immediate select logic.
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'vaddi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'vaddi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vaddi_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,       'x',  False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] vandi_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'vandi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'vandi_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vandi_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m', ' rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'and',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] vori_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'vori_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'vori_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vori_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',     'or',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+ wire [cs_sz-1:0] vxori_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'vxori_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'load',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'vxori_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vxori_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'i',     True,    'shft',      False,       'x',      '0',    'xor',    'x',     'x',  False,        'x', 'logic', False,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] vslli_microcode[7:0];
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to 0 and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+opidx = mc.gen_lines( opidx,                 0,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vslli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'rd',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vslli_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'rd',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] vsrli_microcode[7:0];
+<%
+opidx = 0
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to 0 and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+opidx = mc.gen_lines( opidx,                 0,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vsrli_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'rd',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vsrli_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'rd',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] vsrai_microcode[7:0];
+<%
+opidx = 0
+#// TODO: Account for when RS1 and RD are the same
+#//                                                              cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+#// Set shamt registers
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,          True,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Set the MSB flag to be MSB of input //TODO: Optimize this away
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',  'rs2',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#// Initialize adj_sw_sh_reg_Xh to sext(in) and perform subword-level shifting
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',    'x',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'sext',   True,        'x', 'arith', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs2',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',  False,     'subw', 'shift', False,      'x',   False,     False,    False)
+#// Delay one cycle to ensure all subwords have written back to RF
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',    False,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+#// Perform bitwise shifting
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'vsrai_microcode',  False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'rd',    'x',    'rd',   False, False,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'vsrai_microcode',  False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'm2l',  'seq_rd',       '0',      'm2l',   'rd',    'x',    'rd',   False,  True,     False,      False,     False,         False,      'imm',        'x',    False,       'x',       True,     'add',      '0',      'x',    'x',  'subw',   True,  'bitwise', 'shift', False,      'x',   False,     False,     True)
+%>
+
+// Reduced Precision instructions
+wire [cs_sz-1:0] add1b_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                               cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                 0,'add1b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'add1b_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] add2b_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                                   cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                     0,'add2b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, 2/BISCUIT_P_NBITS - 2,'add2b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                     0,'add2b_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] add4b_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                                   cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                     0,'add4b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, 4/BISCUIT_P_NBITS - 2,'add4b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                     0,'add4b_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+wire [cs_sz-1:0] add8b_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                                   cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                     0,'add8b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, 8/BISCUIT_P_NBITS - 2,'add8b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                     0,'add8b_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+
+wire [cs_sz-1:0] add16b_microcode[2:0];
+
+<%
+opidx = 0
+#//                                                                     cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+opidx = mc.gen_lines( opidx,                      0,'add16b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx, 16/BISCUIT_P_NBITS - 2,'add16b_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                      0,'add16b_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,      False,     False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+
+// mul microcode
+// Mul microcode kind of has the first step of a wallace tree multiplication in that we identify all the partial products
+// It doesn't do reduction of the sums, however, since that is not parallelizable in Nibbler.
+// Instead, we just do the A^2 sums of partial products (black dots on wikipedia), where A is the ratio of the number of bits of result produced (nbits) compared to the total number of bits (2*32 for full precision)
+// In other words, the number of cycles this operation takes is (32/NBITS)^2, so latency grows quadratically as the subword width decreases.
+// Wallace trees handle the overflow concerns by doing multiple reduction layers. Instead, I acknowledge the max amount of overflow 
+
+// for an N*N->N bit precision multiply, we can follow the algorithm until we reach the longest mul step without having to do the second half.
+<%
+print("wire [cs_sz-1:0] mul_microcode["+str(BISCUIT_C_N_OFF*BISCUIT_C_N_OFF+2+10)+":0];") #//TODO: Replace 10
+opidx = 0
+#// We have A and B. Do first add and shift by 1 subword
+#//                                                             cp0_wen, csr_rw, pc_mux_sel, a_mux_sel, a_rd_tmp,  a_seq_en,  a_offset, a_acc_dir,  b_seq_en,  b_offset,  b_acc_dir, a_addr, b_addr, wb_addr, mem_acc, wb_en, wb_adr_en, inc_adr_en, wb_dat_en,  shamt_reg_en, b_imm_used, b_imm_type, b_imm_en, b_imm_sel, b_imm_zero, addsub_fn,  flag_in, logic_fn, mul_fn, adj_sel, adj_en, wb_off_sel, fn_type, fl_en, shft_dir, addr_en, br_reg_en, new_inst
+
+#// Handle first N_OFF columns of multiplication chart
+for stg in range(BISCUIT_C_N_OFF):
+  for ss in range(stg):
+    opidx = mc.gen_lines( opidx,             0,'mul_microcode',   False,    'x',        'x',       'r',    False,  'static',    stg-ss,     'l2m',  'static',        ss,      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',      'x',  'add',     'x',  False,        'x',   'mul', False,      'x',   False,     False,    False)
+  opidx = mc.gen_lines( opidx,               0,'mul_microcode',   False,    'x',        'x',       'r',    False,  'static',       '0',     'l2m',  'static',       stg,      'l2m',  'rs1',  'rs2',     'x',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',      'x', 'adsh',     'x',  False,        'x',   'mul', False,      'x',   False,     False,    False)
+#// Shift result?
+#// Write Back Result.
+opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-2,'mul_microcode',   False,    'x',        'x',       'r',    False,  'static',       '0',     'l2m',  'static',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False, False,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',      'x', 'shft',     'x',  False,        'x',   'mul', False,      'x',   False,     False,    False)
+opidx = mc.gen_lines( opidx,                 0,'mul_microcode',   False,    'x',        'n',       'r',    False,  'static',       '0',     'l2m',  'static',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,       'x',      '0',      'x', 'shft',     'x',  False,        'x',   'mul', False,      'x',   False,     False,     True)
+
+
+#//opidx = mc.gen_lines( opidx, BISCUIT_C_N_OFF-3,'mul_microcode',   False,    'x',        'x',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,    False)
+#//opidx = mc.gen_lines( opidx,                 0,'mul_microcode',   False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',  'rs1',  'rs2',    'rd',   False,  True,     False,      False,     False,         False,      'reg',        'x',    False,       'x',      False,     'add',   'prop',      'x',    'x',     'x',  False,        'x', 'arith',  True,      'x',   False,     False,     True)
+%>
+  wire [cs_sz-1:0] nop_microcode[0:0];
+  assign nop_microcode[0]={cs_sz{1'b1}}; // TEMP FOR DEBUGGING
+
+  wire [cs_sz-1:0] cs_default[0:0];
+<%
+opidx = 0
+opidx = mc.gen_lines( opidx, 0,'cs_default',                      False,    'x',        'n',       'r',    False,  'seq_rd',       '0',     'l2m',  'seq_rd',       '0',      'l2m',   'r0',    'x',     'x',   False, False,     False,     False,      False,         False,      'imm',        'i',     True,       'x',       True,       'x',      '0',      'x',    'x',     'x',  False,        'x', 'arith', False,      'x',   False,     False,    False)
+%>
+
+  wire [cs_sz-1:0] cs_mux_out;
+
+
+
+reg [cs_sz-1:0] selected_uop;
+
+always @ (*) begin
+  casez ( ir_Dhl )
+    `TINYRV2_INST_MSG_NOP  : selected_uop = nop_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADD  : selected_uop = add_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_SUB  : selected_uop = sub_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_AND  : selected_uop = and_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_OR   : selected_uop = or_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_XOR  : selected_uop = xor_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_SLT  : selected_uop = slt_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_SLTU : selected_uop = sltu_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_MUL  : selected_uop = mul_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADDI : selected_uop = addi_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ANDI : selected_uop = andi_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ORI  : selected_uop = ori_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_XORI : selected_uop = xori_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_SLTI : selected_uop = slti_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_SLTIU: selected_uop = sltiu_microcode[uop_idx_Dhl];
+    `ifdef BISCUIT_VECTOR_SHIFT
+    `TINYRV2_INST_MSG_SRAI : selected_uop = srai_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_SRLI : selected_uop = srli_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_SLLI : selected_uop = slli_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_SRA  : selected_uop = sra_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_SRL  : selected_uop = srl_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_SLL  : selected_uop = sll_microcode[uop_idx_Dhl];
+    `endif
+    `TINYRV2_INST_MSG_LUI    : selected_uop = lui_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_AUIPC  : selected_uop = auipc_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_LOAD :   selected_uop = csr_ext_mem_mode ? exload_microcode[uop_idx_Dhl]  : load_microcode[uop_idx_Dhl];     //TODO: Add lb, lh, lbu, lhu
+    `TINYRV2_INST_MSG_STORE:   selected_uop = csr_ext_mem_mode ? exstore_microcode[uop_idx_Dhl] : store_microcode[uop_idx_Dhl];    //TODO: Add sb, sh
+    `TINYRV2_INST_MSG_EXLOAD : selected_uop = exload_microcode[uop_idx_Dhl];   // Same for all sizes; Datapath sext/zext as needed
+    `TINYRV2_INST_MSG_EXSTORE: selected_uop = exstore_microcode[uop_idx_Dhl];  // Same for all sizes; Transducer only reads lowest _len bytes
+    `TINYRV2_INST_MSG_JAL    : selected_uop = jal_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_JALR   : selected_uop = jalr_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_BEQ    : selected_uop = bne_microcode[uop_idx_Dhl]; // same as BNE because datapath checks branch type
+    `TINYRV2_INST_MSG_BNE    : selected_uop = bne_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_BLT  : selected_uop = blt_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_BGE  : selected_uop = bge_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_BLTU : selected_uop = bltu_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_BGEU : selected_uop = bgeu_microcode[uop_idx_Dhl];
+    // // `TINYRV2_INST_MSG_CS: selected_uop = csrr_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_CSRW : selected_uop = csrw_microcode[uop_idx_Dhl]; // Deprecated, replaced by csrrw.
+    `TINYRV2_INST_MSG_CSRRW : selected_uop = csrrw_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_CSRRS : selected_uop = csrrs_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_CSRRC : selected_uop = csrrc_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VLOAD: selected_uop = vle32_v_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VSTORE: selected_uop = vse32_v_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VADD_VI: selected_uop = vaddi_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VADD_VV: selected_uop = add_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VADD_VX: selected_uop = add_microcode[uop_idx_Dhl];
+
+    `TINYRV2_INST_MSG_VSUB_VV: selected_uop = sub_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VSUB_VX: selected_uop = sub_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VAND_VI: selected_uop = vandi_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VAND_VX: selected_uop = and_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VAND_VV: selected_uop = and_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VOR_VI: selected_uop  = vori_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VOR_VX: selected_uop  = or_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VOR_VV: selected_uop  = or_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VXOR_VI: selected_uop = vxori_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VXOR_VX: selected_uop = xor_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VXOR_VV: selected_uop = xor_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VSLL_VI: selected_uop = vslli_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VSRL_VI: selected_uop = vsrli_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VSRA_VI: selected_uop = vsrai_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VMUL_VV: selected_uop = mul_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VMUL_VX: selected_uop = mul_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VMSLT_VX: selected_uop = slt_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_VMSLT_VV: selected_uop = slt_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_VSLL_VX: selected_uop = sll_microcode[uop_idx_Dhl];
+    // `TINYRV2_INST_MSG_VSLL_VV: selected_uop = sll_microcode[uop_idx_Dhl];
+
+    `TINYRV2_INST_MSG_VSETVLI: selected_uop = vsetvli_microcode[uop_idx_Dhl];
+
+    `TINYRV2_INST_MSG_ADD1B : selected_uop = add1b_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADD2B : selected_uop = add2b_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADD4B : selected_uop = add4b_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADD8B : selected_uop = add8b_microcode[uop_idx_Dhl];
+    `TINYRV2_INST_MSG_ADD16B: selected_uop = add16b_microcode[uop_idx_Dhl];
+
+
+    //default to nop
+    default                : selected_uop = cs_default[0]; //nop_microcode[uop_idx_Dhl];
+  endcase
+
+end
+
+
+// Default on reset, otherwise set when a valid instruction comes in and default when it leaves D.
+ assign cs_mux_out = (inst_val_Dhl) ? selected_uop: cs_default[0];
+
+
+  // Parse control signals from ROM
+
+  wire [1:0] uop_repeat_mux_sel_Dhl = cs_mux_out[73:72];
+  wire [4:0] uop_repeat_const_Dhl = cs_mux_out[71:67];
+
+  wire [4:0] uop_repeat_mux_out_Dhl = uop_repeat_const_Dhl;
+
+
+  assign     uop_repeat_Dhl       = uop_repeat_mux_out_Dhl;
+  wire       cp0_wen_Dhl          = cs_mux_out[66];
+  wire       csr_write_en_Dhl     = cs_mux_out[65];
+  wire       csr_read_en_Dhl      = cs_mux_out[64];
+  wire       pc_mux_sel_Dhl       = cs_mux_out[63];
+  wire       pc_plus4_mux_sel_Dhl = cs_mux_out[62]; // 1 -> PC+4, 0 -> PC. Part of a_mux_sel python
+  wire       a_mux_sel_Dhl        = cs_mux_out[61]; // 1 indicates using PC or PC+4
+  wire       a_rd_tmp_Dhl         = cs_mux_out[60];
+  // Register Interface with Mem
+
+  wire       rf_a_seq_en_Dhl      = cs_mux_out[59];
+  wire [4:0] rf_a_base_offset_Dhl = cs_mux_out[58:54]; // To be subsampled to C_OFFBITS bits, but statically set to support 32 offsets.
+  wire       a_access_dir_Dhl     = cs_mux_out[53];
+  wire       rf_b_seq_en_Dhl      = cs_mux_out[52];
+  wire [4:0] rf_b_base_offset_Dhl = cs_mux_out[51:47]; // To be subsampled to C_OFFBITS bits, but statically set to support 32 offsets.
+  wire       b_access_dir_Dhl     = cs_mux_out[46];
+
+  // Swap operand A and B if doing a vv or vx arithmetic instruction
+  // Note: This is a hack to enable reuse of the scalar microcode.
+  wire       op_v_major_opcode_Dhl = ir_Dhl[6:0] == 7'b1010111;
+  wire       op_vreduced_opcode_Dhl= ir_Dhl[6:0] == 7'b1011011;
+  wire       opivi_setvl_type_Dhl  = (ir_Dhl[14:12] == 3'b011) || (ir_Dhl[14:12] == 3'b111);
+  wire       swap_a_and_b_Dhl      = (op_v_major_opcode_Dhl && !opivi_setvl_type_Dhl) || op_vreduced_opcode_Dhl;
+  assign     rega_addr_Dhl         = swap_a_and_b_Dhl ? cs_mux_out[40:36] : cs_mux_out[45:41];
+  assign     regb_addr_Dhl         = swap_a_and_b_Dhl ? cs_mux_out[45:41] : cs_mux_out[40:36];
+  wire [4:0] wb_addr_Dhl           = cs_mux_out[35:31];
+
+
+  wire       mem_access_Dhl       = cs_mux_out[30];
+
+// Differentiate between vector and scalar writeback
+  wire       load_fp_major_opcode_Dhl  = ir_Dhl[6:0] == 7'b0000111;
+  wire       store_fp_major_opcode_Dhl = ir_Dhl[6:0] == 7'b0100111;
+  wire       is_vector_wb_instr_Dhl    = (load_fp_major_opcode_Dhl || (op_v_major_opcode_Dhl && ir_Dhl[14:12] != 3'b111) || op_vreduced_opcode_Dhl);
+
+  wire       wb_en_Dhl             = cs_mux_out[29] && (!is_vector_wb_instr_Dhl);
+  wire       v_wb_en_Dhl           = cs_mux_out[29] && ( is_vector_wb_instr_Dhl);
+
+  wire       wb_to_addr_Dhl       = cs_mux_out[28];
+  wire       sp_subword_incr_Dhl  = cs_mux_out[27];
+  wire       wb_to_data_Dhl       = cs_mux_out[26];
+  wire       shamt_reg_en_Dhl     = cs_mux_out[25];
+
+  // ALU Inputs
+  // Immediate handling
+  wire       b_imm_reg_en_Dhl     = cs_mux_out[24];
+  wire       b_imm_reg_sel_Dhl    = cs_mux_out[23];
+  wire [2:0] b_imm_type_Dhl       = cs_mux_out[22:20];
+  wire       b_imm_zero_Dhl       = cs_mux_out[19];
+  wire       b_mux_sel_Dhl        = cs_mux_out[18];
+
+  wire       addsub_fn_Dhl        = cs_mux_out[17];
+  wire       prop_flag_Dhl        = cs_mux_out[16];
+  wire       carry_in_1_Dhl       = cs_mux_out[15];
+  wire [1:0] logic_fn_Dhl         = cs_mux_out[14:13];
+  wire       adj_sw_mux_sel_Dhl   = cs_mux_out[12];
+  wire       adj_sw_reg_en_Dhl    = cs_mux_out[11];
+  assign     a_offset_mux_sel_Dhl = cs_mux_out[10];
+
+  wire [2:0] alu_fn_type_Dhl      =cs_mux_out[9:7];
+
+  wire       mul_fn_shift_Dhl     =cs_mux_out[6];
+  wire       mul_fn_add_Dhl       =cs_mux_out[5];
+
+  wire       flag_reg_en_Dhl      = cs_mux_out[4];
+  wire       addr_shift_dir_sel_Dhl= cs_mux_out[3];
+  wire       addr_reg_en_Dhl      = cs_mux_out[2];
+  wire       br_reg_en_Dhl        = cs_mux_out[1];
+  assign     last_uop_Dhl         = cs_mux_out[0];
+
+
+  // Process immediate value from IR as necesssary
+  reg  [31:0] immed_Dhl;
+  wire [31:0] immed_shift_mux_out_Dhl;
+
+  wire [31:0] i_immed = {{21{ir_Dhl[31]}}, ir_Dhl[30:25], ir_Dhl[24:21], ir_Dhl[20]};
+  wire [31:0] s_immed = {{21{ir_Dhl[31]}}, ir_Dhl[30:25], ir_Dhl[11:8], ir_Dhl[7]};
+  wire [31:0] b_immed = {{20{ir_Dhl[31]}}, ir_Dhl[7], ir_Dhl[30:25], ir_Dhl[11:8], 1'b0};
+  wire [31:0] u_immed = {ir_Dhl[31:12], 12'b0};
+  wire [31:0] j_immed = {{12{ir_Dhl[31]}}, ir_Dhl[19:12], ir_Dhl[20], ir_Dhl[30:25], ir_Dhl[24:21], 1'b0};
+
+  reg [31:0] immed_type_out_Dhl;
+  always @(*) begin
+    case (b_imm_type_Dhl)
+      immed_type_i: immed_type_out_Dhl = i_immed;
+      immed_type_s: immed_type_out_Dhl = s_immed;
+      immed_type_b: immed_type_out_Dhl = b_immed;
+      immed_type_u: immed_type_out_Dhl = u_immed;
+      immed_type_j: immed_type_out_Dhl = j_immed;
+      default: immed_type_out_Dhl = 32'b0;
+    endcase
+  end
+  wire[31:0] v_immed_mux_out_Dhl = (ir_Dhl[6:0]==7'b1010111) ? {26'b0, ir_Dhl[19:15]} : immed_type_out_Dhl; // Overwrite scalar immediates for vector instructions
+  reg [31:0] immed_prev_Dhl;
+  always @(posedge clk) begin
+    if (reset) begin
+      immed_prev_Dhl <= 32'b0;
+    end else begin
+      immed_prev_Dhl <= immed_Dhl;
+    end
+  end
+<%
+print('  wire [31:0] immed_shifted_Dhl = immed_prev_Dhl >> '+str(BISCUIT_P_NBITS)+';')
+%>
+  assign immed_shift_mux_out_Dhl = (b_imm_reg_sel_Dhl) ? v_immed_mux_out_Dhl : immed_shifted_Dhl;
+
+  always @(*)begin
+    immed_Dhl = (reset) ? 32'b0 : immed_Dhl;
+    if (b_imm_reg_en_Dhl) begin
+      immed_Dhl = immed_shift_mux_out_Dhl;
+    end
+  end
+
+
+
+  // Calculate sub-word offset to be used
+  // Old Logic: Keep incrementing whenever nonzero register is being accessed.
+  // Reset when zero is accessed. This assumes all non-r0 reg accesses occur
+  // on word-aligned accesses.
+
+  // New logic:
+  //   Reset when zero is accessed.
+  //   Whenever a new register is accessed, start at LSSW + OFFSET or MSSW (+ OFFSET, causing overflow but always 0 for MSSW)
+  //   If sequential access, adjust offset by 1 in appropriate direction. Otherwise, keep it the same. OFFSET may change.
+  // This lets us be lazy and not specify an offset if we want super compact microcode, but also specify exact and noncontinuous offset if we desire.
+  // There is a concept of microcode_offset and relative_offset.
+
+reg [4:0] rega_prev_addr_Dhl;
+reg [4:0] regb_prev_addr_Dhl;
+
+
+reg [BISCUIT_C_OFFBITS-1:0] wb_subword_off_Dhl;
+reg [BISCUIT_C_OFFBITS-1:0] wb_prev_subword_off_Dhl;
+
+reg [BISCUIT_C_OFFBITS-1:0] a_relative_off_Dhl;
+reg [BISCUIT_C_OFFBITS-1:0] b_relative_off_Dhl;
+
+reg [BISCUIT_C_OFFBITS-1:0] a_prev_relative_off_Dhl;
+reg [BISCUIT_C_OFFBITS-1:0] b_prev_relative_off_Dhl;
+
+// Reg A
+always @ (*) begin
+  if (reset || rega_addr_Dhl == 5'b0) begin
+    a_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+  end else if (rega_addr_Dhl != rega_prev_addr_Dhl) begin
+    // Microcode specifies new access to a new register
+    if (a_access_dir_Dhl) begin
+      a_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b1}};
+    end else begin
+      a_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+    end
+  end else begin
+    if (rf_a_seq_en_Dhl) begin
+      if (a_access_dir_Dhl) begin
+        a_relative_off_Dhl = a_prev_relative_off_Dhl - {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+      end else begin
+        a_relative_off_Dhl = a_prev_relative_off_Dhl + {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+      end
+    end else begin
+      a_relative_off_Dhl = a_prev_relative_off_Dhl;
+    end
+  end
+end
+assign a_subword_off_Dhl = a_relative_off_Dhl + rf_a_base_offset_Dhl[BISCUIT_C_OFFBITS-1:0];
+
+// Reg B
+always @ (*) begin
+  if (reset || regb_addr_Dhl == 5'b0) begin
+    b_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+  end else if (regb_addr_Dhl != regb_prev_addr_Dhl) begin
+    if (b_access_dir_Dhl) begin
+      b_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b1}};
+    end else begin
+      b_relative_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+    end
+  end else begin
+    if (rf_b_seq_en_Dhl) begin
+      if (b_access_dir_Dhl) begin
+        b_relative_off_Dhl = b_prev_relative_off_Dhl - {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+      end else begin
+        b_relative_off_Dhl = b_prev_relative_off_Dhl + {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+      end
+    end
+  end
+end
+assign b_subword_off_Dhl = b_relative_off_Dhl + rf_b_base_offset_Dhl[BISCUIT_C_OFFBITS-1:0];
+
+// Writeback Reg
+// This follows the old logic of writing sequentially from m2l or l2m. No random offset or "pausing" sequential access.
+// NOTE: Use A access direction.
+reg [4:0] wb_prev_addr_Dhl;
+reg dmemreq_pending;
+always @ (*) begin
+  if (reset || wb_addr_Dhl == 5'b0 || dmemreq_pending) begin
+    wb_subword_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+  end else if (spmemreq_pending_next) begin
+    wb_subword_off_Dhl = wb_subword_off_Dhl; // Hold offset when loading from the scratchpad.
+  end else if (wb_addr_Dhl != wb_prev_addr_Dhl) begin
+    if (a_access_dir_Dhl) begin
+      wb_subword_off_Dhl = {BISCUIT_C_OFFBITS{1'b1}};
+    end else begin
+      wb_subword_off_Dhl = {BISCUIT_C_OFFBITS{1'b0}};
+    end
+  end else begin
+    if (a_access_dir_Dhl) begin
+      wb_subword_off_Dhl = wb_prev_subword_off_Dhl - {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+    end else begin
+      wb_subword_off_Dhl = wb_prev_subword_off_Dhl + {{(BISCUIT_C_OFFBITS-1){1'b0}}, 1'b1};
+    end
+  end
+end
+
+always @(posedge clk) begin
+  if (reset) begin
+    wb_prev_addr_Dhl        <= 5'b0;
+    rega_prev_addr_Dhl      <= 5'b0;
+    regb_prev_addr_Dhl      <= 5'b0;
+    wb_prev_subword_off_Dhl <= {BISCUIT_C_OFFBITS{1'b0}};
+    a_prev_relative_off_Dhl <= {BISCUIT_C_OFFBITS{1'b0}};
+    b_prev_relative_off_Dhl <= {BISCUIT_C_OFFBITS{1'b0}};
+  end else begin
+    wb_prev_addr_Dhl        <= wb_addr_Dhl;
+    rega_prev_addr_Dhl      <= rega_addr_Dhl;
+    regb_prev_addr_Dhl      <= regb_addr_Dhl;
+    wb_prev_subword_off_Dhl <= wb_subword_off_Dhl;
+    a_prev_relative_off_Dhl <= a_relative_off_Dhl;
+    b_prev_relative_off_Dhl <= b_relative_off_Dhl;
+  end
+end
+
+
+  // Vector Extension Control Signals
+  wire vl_reg_en_Dhl = (ir_Dhl[6:0] == 7'b1010111) && (ir_Dhl[14:12] == 3'b111);
+
+
+  // Extract coprocessor info from IR
+  // Defined in RISC-V manual
+  wire [11:0] cp0_addr_Dhl = ir_Dhl[31:20];
+
+
+
+  //---------------------------
+  // Execute stage (X)
+  //---------------------------
+  reg        mem_access_Xhl;
+  reg        cp0_wen_Xhl;
+  reg [11:0] cp0_addr_Xhl;
+  wire       sp_handshake = (spmemreq_val && spmemreq_rdy);
+  // reg [31:0] ir_Xhl;
+  reg        op_v_major_opcode_Xhl;
+  reg        load_fp_major_opcode_Xhl;
+  reg        store_fp_major_opcode_Xhl;
+
+  always @(posedge clk) begin
+    if (reset||ctrl_flow_change_Xhl) begin
+      ir_Xhl <= 32'b0;
+    end else if (!stall_memreq) begin
+      ir_Xhl <= ir_Dhl;
+    end
+  end
+
+
+  always @ (posedge clk) begin
+    if (!stall_memreq) begin
+    csr_write_en_Xhl     <= csr_write_en_Dhl;
+    csr_read_en_Xhl      <= csr_read_en_Dhl;
+    pc_mux_sel_Xhl       <= pc_mux_sel_Dhl;
+    pc_plus4_mux_sel_Xhl <= pc_plus4_mux_sel_Dhl;
+    wb_addr_Xhl          <= wb_addr_Dhl;
+    wb_subword_off_Xhl   <= wb_subword_off_Dhl;
+    mem_access_Xhl       <= mem_access_Dhl;
+    op_v_major_opcode_Xhl<= op_v_major_opcode_Dhl;
+    load_fp_major_opcode_Xhl<=load_fp_major_opcode_Dhl;
+    store_fp_major_opcode_Xhl<=store_fp_major_opcode_Dhl;
+    wb_en_Xhl            <= wb_en_Dhl;
+    wb_access_dir_Xhl    <= a_access_dir_Dhl; // reuse A direction for wb direction in microcode
+    v_wb_en_Xhl          <= (sp_handshake && spmemreq_rw) ? 1'b1 : v_wb_en_Dhl; // When scratchpad responds to vector load
+    vm_reg_en_Xhl        <= 1'b1; // TODO: change to (*.mm inst?) && (vd == v0)
+    wb_to_addr_Xhl       <= wb_to_addr_Dhl;
+    sp_subword_incr_Xhl  <= sp_subword_incr_Dhl;
+    wb_to_data_Xhl       <= wb_to_data_Dhl;
+    `ifdef BISCUIT_VECTOR_SHIFT
+    shamt_reg_en_Xhl     <= shamt_reg_en_Dhl;
+    adj_sw_mux_sel_Xhl   <= adj_sw_mux_sel_Dhl;
+    adj_sw_reg_en_Xhl    <= adj_sw_reg_en_Dhl;
+
+    a_offset_mux_sel_Xhl <= a_offset_mux_sel_Dhl;
+    a_rd_tmp_Xhl         <= a_rd_tmp_Dhl;
+    `endif
+    a_mux_sel_Xhl        <= a_mux_sel_Dhl;
+<%
+print('    b_imm_Xhl            <= b_imm_zero_Dhl ? 1\'b0 : immed_Dhl['+str(BISCUIT_P_NBITS-1)+':0];')
+%>
+    b_mux_sel_Xhl         <= b_mux_sel_Dhl;
+
+    addsub_fn_Xhl          <= addsub_fn_Dhl;
+    prop_flag_Xhl          <= prop_flag_Dhl;
+    carry_in_1_Xhl         <= carry_in_1_Dhl;
+    logic_fn_Xhl           <= logic_fn_Dhl;
+    alu_fn_type_Xhl        <= alu_fn_type_Dhl;
+    mul_fn_shift_Xhl       <= mul_fn_shift_Dhl;
+    mul_fn_add_Xhl         <= mul_fn_add_Dhl;
+    flag_reg_en_Xhl        <= flag_reg_en_Dhl;
+    addr_shift_dir_sel_Xhl <= addr_shift_dir_sel_Dhl;
+
+    addr_reg_en_Xhl        <= addr_reg_en_Dhl;
+    last_uop_Xhl           <= last_uop_Dhl;
+    br_reg_en_Xhl          <= br_reg_en_Dhl;
+    cp0_wen_Xhl            <= cp0_wen_Dhl;
+    cp0_addr_Xhl           <= cp0_addr_Dhl;
+    vl_reg_en_Xhl        <= vl_reg_en_Dhl;
+    end
+  end
+
+// Multiplication Shift Register Logic
+// # of offsets for standard mul is just C_N_OFF. Increases for full precision mulh
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+%>
+localparam BISCUIT_C_OVRFLOW_NBITS = $clog2(32/BISCUIT_P_NBITS); // Found through algorithm analysis of mul
+
+// Offset indicating which subword to write to in mul intermediate value
+// Also used to indicate which subword to read from for use in the sum of the partial product MAC
+// reg  [BISCUIT_C_OFFBITS-1:0] mul_inter_wr_off_Xhl;
+always @(posedge clk) begin
+  if (reset || last_uop_Xhl) begin
+    mul_inter_wr_off_Xhl <= {BISCUIT_C_OFFBITS{1'b0}};
+  end else if (mul_fn_shift_Xhl) begin
+    mul_inter_wr_off_Xhl <= mul_inter_wr_off_Xhl + 1'b1;
+  end
+end
+// Offset indicating which subword to write back to processor
+// reg  [BISCUIT_C_OFFBITS-1:0] mul_inter_rfwb_off_Xhl;
+always @(posedge clk) begin
+  if (reset || last_uop_Xhl) begin
+    mul_inter_rfwb_off_Xhl <= {BISCUIT_C_OFFBITS{1'b0}};
+  end else if (mul_fn_shift_Xhl || wb_en_Xhl) begin
+    mul_inter_rfwb_off_Xhl <= mul_inter_rfwb_off_Xhl + 1'b1;
+  end
+end
+// wire [32 + BISCUIT_C_OVRFLOW_NBITS - 1:0] mul_inter_reg_en_Xhl; // BISCUIT_P_NBIT + OVERFLOW_NBITS  hot signal of enables for intermediate value storage
+assign mul_inter_reg_en_Xhl = ({{BISCUIT_C_OVRFLOW_NBITS{mul_fn_add_Xhl}},{2*BISCUIT_P_NBITS{mul_fn_add_Xhl}}}) << (BISCUIT_P_NBITS * mul_inter_wr_off_Xhl);
+
+
+
+// Shifting Control signals:
+assign      rs1_Xhl = ir_Xhl[19:15];
+wire [4:0]  rs2_Xhl = ir_Xhl[24:20];
+assign shamt_mux_sel_Xhl = op_v_major_opcode_Xhl ? 1'b0 : ir_Xhl[5];   // Based on opcode for SRA/SRAI. TODO: Currently only vector shift supported is vsll.vi
+assign shamt_imm_Xhl = op_v_major_opcode_Xhl ? rs1_Xhl : rs2_Xhl;
+assign shift_inst_dir_Xhl = op_v_major_opcode_Xhl ? ir_Xhl[29] : ir_Xhl[14]; // based on funct3 for RISCV Shifts. TODO: Currently only vector shift supported is vsll.vi
+
+// Branching control signals:
+assign br_type_Xhl = ir_Xhl[14:12];
+
+// Vector lane masking:
+
+wire vector_arithmetic_instruction_Xhl = op_v_major_opcode_Xhl && (ir_Xhl[14:12] != 3'b111);
+assign masking_en_Xhl = (load_fp_major_opcode_Xhl || store_fp_major_opcode_Xhl || op_v_major_opcode_Xhl || vector_arithmetic_instruction_Xhl) 
+                         && !ir_Xhl[25];
+
+// Vector memory accesses.
+// Parses IR to see if it's a 32-bit wide element unit-stride vector loador store
+assign vector_memop_Xhl = (ir_Xhl[6:0] == 7'b0000111 || ir_Xhl[6:0] == 7'b0100111) && !ir_Xhl[28] && (ir_Xhl[14:12] == 3'b110);
+
+// Coprocessor0
+  reg        cp0_stats;
+
+  reg [31:0] cp0_status_next;
+  reg        cp0_stats_next;
+
+  always @ (*) begin
+    cp0_status_next = cp0_status;
+    cp0_stats_next = cp0_stats;
+    if (cp0_wen_Xhl && (cp0_addr_Xhl == 12'h7c0)) begin
+      cp0_status_next = proc2cop_data_Xhl;
+    end else if (cp0_wen_Xhl && (cp0_addr_Xhl == 12'h7c1)) begin
+      cp0_stats_next = proc2cop_data_Xhl[0];
+    end
+  end
+
+  //---------------------------------
+  // Handle off-tile memory requests
+  //---------------------------------
+
+  wire scalar_sp_memreq_Xhl = (((ir_Xhl[6:0] == 7'b0000011) || (ir_Xhl[6:0] ==7'b0100011)) && !csr_ext_mem_mode) ;
+  wire vector_sp_memreq_Xhl = ((ir_Xhl[6:0] == 7'b0000111) || (ir_Xhl[6:0] ==7'b0100111));
+  wire inst_accesses_sp_Xhl = scalar_sp_memreq_Xhl || vector_sp_memreq_Xhl;
+
+  // load=0 store=1; constant = opcode[6:0] for all stores taken from risc-v manual.
+  assign dmemreq_msg_rw = (ir_Xhl[6:0] == 7'b0100011 || ir_Xhl[6:0] == 7'b0101011);
+  // 1 = 1B, 2 = 2B, 3 = 3B, 0 = 4B
+  // In risc-v, all Byte have [13:12] == 00, Half = 01, Word = 10
+  assign dmemreq_msg_len = (ir_Xhl[13:12] == 2'b00) ? 2'b01 :
+                          ((ir_Xhl[13:12] == 2'b01) ? 2'b10 :
+                          ((ir_Xhl[13:12] == 2'b10) ? 2'b00 :
+                          ((ir_Xhl[13:12] == 2'b11) ? 2'b11 :
+                            2'b00)));
+
+  assign dmemreq_signed = ir_Xhl[14];
+
+  reg dmemreq_val_next;
+  
+
+  always @(*) begin
+    dmemreq_val_next = dmemreq_val;
+    if (dmemreq_val && dmemreq_rdy) begin
+      dmemreq_val_next = 1'b0;
+    end else if (mem_access_Xhl && !inst_accesses_sp_Xhl && !dmemreq_pending) begin
+      dmemreq_val_next = 1'b1;
+    end
+  end
+
+  // We are always ready to accept a memory response
+  // any time after the dmemreq is sent
+  assign dmemresp_rdy = dmemreq_pending;
+
+  always @ (*)
+  begin
+    dmemreq_pending_next = dmemreq_pending;
+    // If a dmem request is not pending and the instruction in X indicates it's ready to access memory
+    if (reset) begin
+      dmemreq_pending_next = 1'b0;
+    end else if (dmemresp_val && dmemresp_rdy) begin
+      dmemreq_pending_next = 1'b0;
+    end else if (biscuit_int || biscuit_csr_int) begin
+      dmemreq_pending_next = 1'b0;
+    end else if (mem_access_Xhl && !inst_accesses_sp_Xhl) begin
+      dmemreq_pending_next = 1'b1;
+    end
+  end
+
+//-------------------------------------
+  // Handle scratchpad memory requests
+  //-----------------------------------
+  // load=0 store=1; constant = opcode[6:0] for all stores taken from risc-v manual.
+  //assign dmemreq_msg_rw = (ir_Xhl[6:0] == 7'b0100011);
+  // 1 = 1B, 2 = 2B, 3 = 3B, 0 = 4B
+  // In risc-v, all Byte have [13:12] == 00, Half = 01, Word = 10
+  // assign dmemreq_msg_len = (ir_Xhl[13:12] == 00) ? 2'b01 :
+  //                         ((ir_Xhl[13:12] == 01) ? 2'b10 :
+  //                         ((ir_Xhl[13:12] == 10) ? 2'b00 :
+  //                           2'b00));
+
+  assign spmemreq_rw = !((ir_Xhl[6:0] == 7'b0100111) || ((ir_Xhl[6:0] == 7'b0100011) && inst_accesses_sp_Xhl)); // vector store or scalar store to scratchpad
+
+  assign spmemreq_val = mem_access_Xhl && inst_accesses_sp_Xhl;
+
+  reg spmemreq_pending;
+
+  always @ (*)
+  begin
+    spmemreq_pending_next = spmemreq_pending;
+    // If a dmem request is not pending and the instruction in X indicates it's ready to access memory
+    if (reset) begin
+      spmemreq_pending_next = 1'b0;
+    end else if (spmemreq_val && spmemreq_rdy) begin // Scratchpad always responds in 1 cycle
+      spmemreq_pending_next = 1'b0;
+    end else if (mem_access_Xhl && inst_accesses_sp_Xhl && !spmemreq_rdy) begin
+      spmemreq_pending_next = 1'b1;
+    end
+  end
+
+  always @(posedge clk) begin
+    if (reset) begin
+      sp_handshake_prev <= 1'b0;
+    end else begin
+      sp_handshake_prev <= sp_handshake;
+    end
+  end
+
+  always @ (posedge clk) begin
+    if (reset) begin
+      cp0_status <= 32'b0;
+      cp0_stats <= 1'b0;
+      dmemreq_val <= 1'b0;
+      dmemreq_pending <= 1'b0;
+      spmemreq_pending <= 1'b0;
+    end else begin
+      cp0_status <= cp0_status_next;
+      cp0_stats <= cp0_stats_next;
+      dmemreq_val <= dmemreq_val_next;
+      dmemreq_pending <= dmemreq_pending_next;
+      spmemreq_pending <= spmemreq_pending_next;
+    end
+  end
+
+endmodule
+`endif
+

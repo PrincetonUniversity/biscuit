@@ -1,0 +1,168 @@
+//============================================================================
+// Paramaterizable bit-width ALU containing add/sub, logical, shifter. (mul?)
+//============================================================================
+
+`ifndef BISCUIT_CORE_DPATH_ALU_V
+`define BISCUIT_CORE_DPATH_ALU_V
+
+<%
+from pyhplib import *
+%>
+//-------------------------------------------------------------------------
+// Main alu
+//-------------------------------------------------------------------------
+
+module  biscuit_CoreDpathAlu
+
+(
+  input               reset,
+<%
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0] in_a,')
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0] in_b,')
+%>
+  input               in_c,
+  input               addsub_fn,           // 0=add, 1=sub
+  input [1:0]         logic_fn,            // XOR=00, OR=10, AND=11 (bits [14:13] of IR), A!B=01 (used for csrrc)
+
+`ifdef BISCUIT_VECTOR_SHIFT
+  input               shift_dir,           // 0=left, 1=right
+  input               signed_off_msb,
+  input               bitwise_subword_sel, // 0=bitwise, 1=subword-wise shift 
+<%  
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]      in_adj_subword,')
+if BISCUIT_P_NBITS == 1:
+  print("      input bitwise_shamt, // dummy for bit-serial")
+else:
+  print("      input ["+str(BISCUIT_C_LOG_NBITS-1)+":0] bitwise_shamt,")
+
+print('  output ['+str(BISCUIT_P_NBITS-1)+':0] shift_out,')
+%>
+`endif
+  input [2:0]         fn_type,
+
+<%
+print('  output ['+str(BISCUIT_P_NBITS-1)+':0]     sum_out,')
+%>
+  output                   carry_out,
+  output                   a_b_not_eq,
+<%
+print('  output reg ['+str(BISCUIT_P_NBITS-1)+':0] fn_out,')
+print('  output     ['+str(2*BISCUIT_P_NBITS-1)+':0] mul_out')
+%>
+
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+%>
+
+// Gate inputs
+//-------------
+localparam INST_ARITH = 3'b000;
+localparam INST_JALR  = 3'b011;
+localparam INST_LOGIC = 3'b001;
+localparam INST_SHIFT = 3'b010;
+localparam INST_MUL   = 3'b100;
+
+reg [BISCUIT_P_NBITS-1:0] in_a_addsub;
+reg [BISCUIT_P_NBITS-1:0] in_b_addsub;
+reg                       in_c_addsub;
+reg [BISCUIT_P_NBITS-1:0] in_a_alu;
+reg [BISCUIT_P_NBITS-1:0] in_b_alu;
+reg [BISCUIT_P_NBITS-1:0] in_a_shift;
+reg [BISCUIT_P_NBITS-1:0] in_a_mul;
+reg [BISCUIT_P_NBITS-1:0] in_b_mul;
+
+always @(*) begin
+  in_a_addsub = in_a_addsub;
+  in_b_addsub = in_b_addsub;
+  in_c_addsub = in_c_addsub;
+  in_a_alu = in_a_alu;
+  in_b_alu = in_b_alu;
+  in_a_shift = in_a_shift;
+  in_a_mul = in_a_mul;
+  in_b_mul = in_b_mul;
+  if (reset) begin
+    in_a_addsub = {BISCUIT_P_NBITS{1'b0}};
+    in_b_addsub = {BISCUIT_P_NBITS{1'b0}};
+    in_c_addsub = 1'b0;
+    in_a_alu    = {BISCUIT_P_NBITS{1'b0}};
+    in_b_alu    = {BISCUIT_P_NBITS{1'b0}};
+    in_a_shift  = {BISCUIT_P_NBITS{1'b0}};
+    in_a_mul    = {BISCUIT_P_NBITS{1'b0}};
+    in_b_mul    = {BISCUIT_P_NBITS{1'b0}};
+  end else begin
+    in_a_addsub = in_a;
+    in_b_addsub = in_b;
+    in_c_addsub = in_c;
+    in_a_alu    = in_a;
+    in_b_alu    = in_b;
+    in_a_shift  = in_a;
+    in_a_mul    = in_a;
+    in_b_mul    = in_b;
+  end
+end
+
+// Add/Sub unit
+wire [BISCUIT_P_NBITS-1:0] b_mux_out = addsub_fn ? ~in_b_addsub : in_b_addsub;
+assign {carry_out, sum_out} = in_a_addsub + b_mux_out + in_c_addsub;
+
+// Logical Unit
+localparam FN_XOR   = 2'b00;
+localparam FN_AND   = 2'b11;
+localparam FN_OR    = 2'b10;
+localparam FN_A_NB  = 2'b01;
+localparam FN_SHIFT = 2'b11;
+
+wire [BISCUIT_P_NBITS-1:0] xor_out = in_a_alu ^ in_b_alu;
+wire [BISCUIT_P_NBITS-1:0] and_out = in_a_alu & in_b_alu;
+wire [BISCUIT_P_NBITS-1:0] or_out  = in_a_alu | in_b_alu;
+wire [BISCUIT_P_NBITS-1:0] a_nb_out  = in_a_alu & ~in_b_alu;
+
+always @(*) begin
+  case (logic_fn)
+    FN_XOR:  fn_out = xor_out;
+    FN_AND:  fn_out = and_out;
+    FN_OR:   fn_out = or_out;
+    FN_A_NB: fn_out = a_nb_out;
+    default: fn_out = and_out;
+  endcase
+end
+
+assign a_b_not_eq = |xor_out;
+
+`ifdef BISCUIT_VECTOR_SHIFT 
+// Subword-wise Shifter Unit
+//---------------------------
+// Adjacent subword will be pre-set in microcode to 0 or MSB(in) based on sign of sw_offset. 
+wire [BISCUIT_P_NBITS-1:0] subword_shift_out = signed_off_msb ? in_adj_subword : in_a_shift;
+
+// Bitwise Shifter Unit
+//----------------------
+// The microcode ensures all subword-level 
+// translation preserves sign extension when necessary.
+//   Thus, the only subword where we care about 
+//   sign extension is the very first one on SRA only.
+// Microcode will initializes in_adj_subword to 0 or SEXT(MSB)
+//   on all right shifts anyway.
+//   Thus, we do not need to differentiate between
+//   arithmetic and logical shifts.
+
+// For right shifts, we go from MSSW to LSSW
+wire [(2*BISCUIT_P_NBITS)-1:0] concat_subwords = shift_dir ? {in_adj_subword, in_a_shift} : {in_a_shift, in_adj_subword};
+wire [(2*BISCUIT_P_NBITS)-1:0] left_shift_result = concat_subwords << bitwise_shamt;
+wire [(2*BISCUIT_P_NBITS)-1:0] right_shift_result = concat_subwords >> bitwise_shamt;
+
+// Choose MSBits for SLL and LSBits for Right Shifts
+wire [BISCUIT_P_NBITS-1:0] bitwise_shift_out = (shift_dir) ? right_shift_result[BISCUIT_P_NBITS-1:0]
+                                                           : left_shift_result[2*BISCUIT_P_NBITS-1:BISCUIT_P_NBITS];
+
+assign shift_out = bitwise_subword_sel ? subword_shift_out : bitwise_shift_out;
+`endif
+
+// Multiplication
+assign mul_out = in_a_mul * in_b_mul;
+
+endmodule
+
+`endif

@@ -1,0 +1,439 @@
+//=========================================================================
+// Variable bit-width RISCV Core
+//=========================================================================
+`ifndef BISCUIT_CORE_V
+`define BISCUIT_CORE_V
+
+`include "vc-MemReqMsg.v"
+`include "vc-MemRespMsg.v"
+
+<%
+from pyhplib import *
+%>
+
+module biscuit_Core
+(
+  input         clk,
+  input         reset_l,
+  output        biscuit_csr_int,
+  input         biscuit_int,
+  output        csr_disable_biscuit,
+
+  input                                 biscuit_conf,
+  input  [2:0]                          biscuit_code,
+  input  [63:0]                         conf_data,
+  output [63:0]                         biscuit_conf_read_data,
+
+  // Instruction Memory Request Port
+
+  output [`VC_MEM_REQ_MSG_SZ(32,32)-1:0] imemreq_msg,
+  output                                 imemreq_nc,
+  output                                 imemreq_val,
+  input                                  imemreq_rdy,
+
+  // Instruction Memory Response Port
+
+  input [`VC_MEM_RESP_MSG_SZ(32)-1:0] imemresp_msg,
+  input                               imemresp_val,
+  output                              imemresp_rdy,
+
+  // Extended memory address functionality
+  output                              use_addr_ext,
+  output [7:0]                        memreq_addr_ext,
+  output [31:0]                       memreq_data_ext,
+
+  // Data Memory Request Port
+
+  output [`VC_MEM_REQ_MSG_SZ(32,32)-1:0] dmemreq_msg,
+  output                                 dmemreq_nc,
+  output                                 dmemreq_val,
+  input                                  dmemreq_rdy,
+
+  // Data Memory Response Port
+
+  input [`VC_MEM_RESP_MSG_SZ(32)-1:0] dmemresp_msg,
+  input                               dmemresp_val,
+  output                              dmemresp_rdy,
+
+  // Scratchpad Interface
+  output [14:0]                                 spmemreq_msg_addr,
+<%
+print('  output ['+str(BISCUIT_P_NLANES*BISCUIT_P_NBITS-1)+':0] spmemreq_msg_data,')
+print('  output ['+str(BISCUIT_P_NLANES*BISCUIT_P_NBITS-1)+':0] spmemreq_msg_bw,')
+%>
+  output                                        spmemreq_rw,
+  output                                        spmemreq_val,
+  input                                         spmemreq_rdy,
+
+<%
+print('  input ['+str(BISCUIT_P_NLANES*BISCUIT_P_NBITS-1)+':0]  spmemresp_msg_data,')
+%>
+
+  // CP0 Status Register Output to Host
+  output [31:0] csr_status,
+
+  output [31:0] pc_Fhl
+
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS) + ';')
+print('  localparam BISCUIT_P_NLANES = '+str(BISCUIT_P_NLANES)+';')
+%>
+
+  wire reset = !reset_l;
+
+  wire [31:0]          imemreq_msg_addr;
+  wire [31:0]          imemresp_msg_data;
+  wire                 dmemreq_msg_rw;
+  wire  [1:0]          dmemreq_msg_len;
+  wire                 dmemreq_signed;
+  wire [31:0]          dmemreq_msg_addr;
+  wire [31:0]          dmemreq_msg_data;
+  wire [31:0]          dmemresp_msg_data;
+  wire                 sp_handshake_prev;
+  wire                 csr_read_en_Xhl;
+  wire                 csr_write_en_Xhl;
+  wire                 csr_ext_mem_mode;
+  wire                 vector_memop_Xhl;
+  wire                 new_inst;
+  wire [31:0]          ir_Fhl;
+  wire [31:0]          ir_Xhl;
+  wire                 new_rfreq_Fhl;
+  wire                 accept_new_inst_Dhl;
+  wire                 pc_mux_sel_Xhl;
+  wire                 pc_plus4_mux_sel_Xhl;
+  wire [4:0]           rega_addr_Dhl;
+  wire [4:0]           regb_addr_Dhl;
+  wire                 rfreq_val_Fhl;
+  wire                 rfreq_rdy_Fhl;
+  wire                 rfresp_val_Rhl;
+  wire                 rfresp_rdy_Rhl;
+  wire                 rd_en0;
+  wire [4:0]           rs1_addr_Fhl;
+  wire                 rd_en1;
+  wire [4:0]           rs2_addr_Fhl;
+  wire [4:0]           rs1_Dhl;
+  wire [4:0]           rs2_Dhl;
+  wire [4:0]           rd_Dhl;
+  wire [4:0]           rs1_Xhl;
+  wire [4:0]           wb_addr_Xhl;
+  wire                 wb_en_Xhl;
+  wire                 wb_access_dir_Xhl;
+  wire                 v_wb_en_Xhl;
+  wire                 vm_reg_en_Xhl;
+  wire                 masking_en_Xhl;
+  wire                 sp_subword_incr_Xhl;
+  wire                 wb_to_addr_Xhl;
+  wire                 wb_to_data_Xhl;
+
+  // ALU Inputs
+  wire                 shamt_reg_en_Xhl;
+  wire                 shamt_mux_sel_Xhl;
+  wire                 adj_sw_mux_sel_Xhl;
+  wire                 adj_sw_reg_en_Xhl;
+  wire                 a_offset_mux_sel_Dhl;
+  wire                 a_offset_mux_sel_Xhl;
+  wire                 [4:0] shamt_imm_Xhl;
+  wire                 shift_inst_dir_Xhl;
+  wire                 a_rd_tmp_Xhl;
+
+
+  wire                 a_mux_sel_Xhl;
+<%
+print('  wire ['+str(BISCUIT_P_NBITS-1)+':0]            b_imm_Xhl;')
+%>
+  wire                 b_mux_sel_Xhl;
+  // ALU Outputs
+<%
+print('  wire ['+str(BISCUIT_C_OFFBITS-1)+':0]           a_subword_off_Dhl;')
+print('  wire ['+str(BISCUIT_C_OFFBITS-1)+':0]           b_subword_off_Dhl;')
+print('  wire ['+str(BISCUIT_C_OFFBITS-1)+':0]           wb_subword_off_Xhl;')
+%>
+  wire                 addsub_fn_Xhl;
+  wire [1:0]           logic_fn_Xhl;
+  wire [2:0]           alu_fn_type_Xhl;
+  wire                 mul_fn_add_Xhl;
+  wire                 mul_fn_shift_Xhl;
+  wire [BISCUIT_C_OFFBITS-1:0] mul_inter_wr_off_Xhl;
+  wire [BISCUIT_C_OFFBITS-1:0] mul_inter_rfwb_off_Xhl;
+  wire [63:0]                  mul_inter_reg_en_Xhl;
+
+  wire                 prop_flag_Xhl;
+  wire                 carry_in_1_Xhl;
+  wire                 flag_reg_en_Xhl;
+  wire                 addr_shift_dir_sel_Xhl;
+  wire                 addr_reg_en_Xhl;
+  wire                 last_uop_Xhl;
+  wire                 br_reg_en_Xhl;
+  wire [2:0]           br_type_Xhl;
+
+  wire                 branch_taken_Xhl;
+  wire                 b_use_imm_reg_Xhl;
+  wire [31:0]          proc2cop_data_Xhl;
+
+  wire                 vl_reg_en_Xhl;
+  //----------------------------------------------------------------------
+  // Pack Memory Request Messages
+  //----------------------------------------------------------------------
+
+  assign imemreq_msg = {1'b0, imemreq_msg_addr, 2'b0, 32'b0};
+
+  assign dmemreq_msg = {dmemreq_msg_rw, dmemreq_msg_addr, dmemreq_msg_len, dmemreq_msg_data};
+
+  //----------------------------------------------------------------------
+  // Unpack Memory Response Messages
+  //----------------------------------------------------------------------
+
+  assign imemresp_msg_data = imemresp_msg[31:0];
+
+  assign dmemresp_msg_data = dmemresp_msg[31:0];
+
+  //----------------------------------------------------------------------
+  // Control Unit
+  //----------------------------------------------------------------------
+
+  biscuit_Ctrl ctrl
+  (
+    .clk                    (clk),
+    .reset                  (reset),
+    .biscuit_csr_int        (biscuit_csr_int),
+    .biscuit_int            (biscuit_int),
+
+    // Instruction Memory Port
+
+    .imemreq_val            (imemreq_val),
+    .imemreq_rdy            (imemreq_rdy),
+    .imemresp_msg_data      (imemresp_msg_data),
+    .imemresp_val           (imemresp_val),
+    .imemresp_rdy           (imemresp_rdy),
+
+    // Data Memory Port
+    .dmemreq_msg_rw         (dmemreq_msg_rw),
+    .dmemreq_msg_len        (dmemreq_msg_len),
+    .dmemreq_signed         (dmemreq_signed),
+    .dmemreq_val            (dmemreq_val),
+    .dmemreq_rdy            (dmemreq_rdy),
+    .dmemresp_val           (dmemresp_val),
+    .dmemresp_rdy           (dmemresp_rdy),
+
+    .vector_memop_Xhl       (vector_memop_Xhl),
+    .spmemreq_rw            (spmemreq_rw),
+    .spmemreq_val           (spmemreq_val),
+    .spmemreq_rdy           (spmemreq_rdy),
+    .sp_handshake_prev      (sp_handshake_prev),
+
+    .csr_read_en_Xhl        (csr_read_en_Xhl),
+    .csr_write_en_Xhl       (csr_write_en_Xhl),
+    .csr_ext_mem_mode       (csr_ext_mem_mode),
+
+    .ir_Fhl                 (ir_Fhl),
+    .ir_Xhl                 (ir_Xhl),
+    .new_rfreq_Fhl          (new_rfreq_Fhl),
+    .accept_new_inst_Dhl    (accept_new_inst_Dhl),
+    .pc_mux_sel_Xhl         (pc_mux_sel_Xhl),
+    .pc_plus4_mux_sel_Xhl   (pc_plus4_mux_sel_Xhl),
+
+    // Register File Interface
+    .rega_addr_Dhl          (rega_addr_Dhl), // TEMP: Remove once vrf is no longer serialized
+    .regb_addr_Dhl          (regb_addr_Dhl), // TEMP: Remove once vrf is no longer serialized
+    .rfreq_val_Fhl          (rfreq_val_Fhl),
+    .rfreq_rdy_Fhl          (rfreq_rdy_Fhl),
+    .rfresp_val_Rhl         (rfresp_val_Rhl),
+    .rfresp_rdy_Rhl         (rfresp_rdy_Rhl),
+    .rd_en0                 (rd_en0),
+    .rs1_addr_Fhl           (rs1_addr_Fhl),
+    .rd_en1                 (rd_en1),
+    .rs2_addr_Fhl           (rs2_addr_Fhl),
+    .rs1_Dhl                (rs1_Dhl),
+    .rs2_Dhl                (rs2_Dhl),
+    .rd_Dhl                 (rd_Dhl),
+    .rs1_Xhl                (rs1_Xhl),
+
+    .wb_addr_Xhl            (wb_addr_Xhl),
+    .wb_en_Xhl              (wb_en_Xhl),
+    .wb_access_dir_Xhl      (wb_access_dir_Xhl),
+    .v_wb_en_Xhl            (v_wb_en_Xhl),
+    .vm_reg_en_Xhl          (vm_reg_en_Xhl),
+    .masking_en_Xhl         (masking_en_Xhl),
+    .sp_subword_incr_Xhl    (sp_subword_incr_Xhl),
+    .wb_to_addr_Xhl         (wb_to_addr_Xhl),
+    .wb_to_data_Xhl         (wb_to_data_Xhl),
+
+    .shamt_reg_en_Xhl       (shamt_reg_en_Xhl),
+    .shamt_mux_sel_Xhl      (shamt_mux_sel_Xhl),
+    .adj_sw_mux_sel_Xhl     (adj_sw_mux_sel_Xhl),
+    .adj_sw_reg_en_Xhl      (adj_sw_reg_en_Xhl),
+    .a_offset_mux_sel_Dhl   (a_offset_mux_sel_Dhl),
+    .a_offset_mux_sel_Xhl   (a_offset_mux_sel_Xhl),
+
+    .shamt_imm_Xhl          (shamt_imm_Xhl),
+    .shift_inst_dir_Xhl     (shift_inst_dir_Xhl),
+    .a_rd_tmp_Xhl           (a_rd_tmp_Xhl),
+    .a_mux_sel_Xhl          (a_mux_sel_Xhl),
+    .b_imm_Xhl              (b_imm_Xhl),
+    .b_mux_sel_Xhl          (b_mux_sel_Xhl),
+
+    .a_subword_off_Dhl      (a_subword_off_Dhl),
+    .b_subword_off_Dhl      (b_subword_off_Dhl),
+    .wb_subword_off_Xhl     (wb_subword_off_Xhl),
+
+    .addsub_fn_Xhl          (addsub_fn_Xhl),
+    .logic_fn_Xhl           (logic_fn_Xhl),
+    .alu_fn_type_Xhl        (alu_fn_type_Xhl),
+    .mul_fn_add_Xhl         (mul_fn_add_Xhl),
+    .mul_fn_shift_Xhl       (mul_fn_shift_Xhl),
+    .mul_inter_wr_off_Xhl   (mul_inter_wr_off_Xhl),
+    .mul_inter_rfwb_off_Xhl (mul_inter_rfwb_off_Xhl),
+    .mul_inter_reg_en_Xhl   (mul_inter_reg_en_Xhl),
+
+    .prop_flag_Xhl          (prop_flag_Xhl),
+    .carry_in_1_Xhl         (carry_in_1_Xhl),
+    .flag_reg_en_Xhl        (flag_reg_en_Xhl),
+    .addr_shift_dir_sel_Xhl (addr_shift_dir_sel_Xhl),
+    .addr_reg_en_Xhl        (addr_reg_en_Xhl),
+    .last_uop_Xhl           (last_uop_Xhl),
+    .br_reg_en_Xhl          (br_reg_en_Xhl),
+    .br_type_Xhl            (br_type_Xhl),
+
+    .branch_taken_Xhl       (branch_taken_Xhl),
+    .b_use_imm_reg_Xhl      (b_use_imm_reg_Xhl),
+    .proc2cop_data_Xhl      (proc2cop_data_Xhl),
+
+    .vl_reg_en_Xhl          (vl_reg_en_Xhl),
+
+    .cp0_status             (csr_status)
+
+  );
+
+  //----------------------------------------------------------------------
+  // Datapath
+  //----------------------------------------------------------------------
+  wire [31:0] biscuit_dcp_csr_read_data;
+  assign biscuit_conf_read_data = {32'b0, biscuit_dcp_csr_read_data} ;
+
+  biscuit_Dpath dpath
+  (
+    .clk                     (clk),
+    .reset                   (reset),
+    .biscuit_csr_int         (biscuit_csr_int),
+    .biscuit_int             (biscuit_int),
+    .csr_disable_biscuit     (csr_disable_biscuit),
+
+    .imemreq_msg_addr        (imemreq_msg_addr),
+    .imemreq_nc              (imemreq_nc),
+    .dmemreq_msg_addr        (dmemreq_msg_addr),
+    .dmemreq_msg_data        (dmemreq_msg_data),
+    .dmemreq_msg_len         (dmemreq_msg_len),
+    .dmemreq_nc              (dmemreq_nc),
+    .memreq_signed           (dmemreq_signed),
+    .dmemresp_msg_data       (dmemresp_msg_data),
+    .dmemresp_val_Xhl        (dmemresp_val),
+    .use_addr_ext            (use_addr_ext),
+    .memreq_addr_ext         (memreq_addr_ext),
+    .memreq_data_ext         (memreq_data_ext),
+
+    // Scratchpad Interface
+    .vector_memop_Xhl       (vector_memop_Xhl),
+    .spmemreq_rw            (spmemreq_rw),
+    .spmemreq_msg_addr      (spmemreq_msg_addr),
+    .spmemreq_msg_data      (spmemreq_msg_data),
+    .spmemreq_msg_bw        (spmemreq_msg_bw),
+    .spmemresp_msg_data     (spmemresp_msg_data),
+    .sp_handshake_prev      (sp_handshake_prev),
+
+    // CSRs
+    .csr_read_en_Xhl           (csr_read_en_Xhl),
+    .csr_write_en_Xhl          (csr_write_en_Xhl),
+    .csr_ext_mem_mode          (csr_ext_mem_mode),
+    // Maple
+    .biscuit_conf              (biscuit_conf),
+    .biscuit_code              (biscuit_code),
+    .conf_data                 (conf_data[31:0]),
+    .biscuit_dcp_csr_read_data (biscuit_dcp_csr_read_data),
+
+    // Controls Signals (ctrl->dpath)
+    .ir_Fhl                  (ir_Fhl),
+    .ir_Xhl                  (ir_Xhl),
+    .new_rfreq_Fhl           (new_rfreq_Fhl),
+    .accept_new_inst_Dhl     (accept_new_inst_Dhl),
+    .pc_mux_sel_Xhl          (pc_mux_sel_Xhl),
+    .pc_plus4_mux_sel_Xhl    (pc_plus4_mux_sel_Xhl),
+
+    // Register File Interface
+    .rega_addr_Dhl           (rega_addr_Dhl),
+    .regb_addr_Dhl           (regb_addr_Dhl),
+
+    .rfreq_val_Fhl          (rfreq_val_Fhl),
+    .rfreq_rdy_Fhl          (rfreq_rdy_Fhl),
+    .rfresp_val_Rhl         (rfresp_val_Rhl),
+    .rfresp_rdy_Rhl         (rfresp_rdy_Rhl),
+    .rd_en0                 (rd_en0),
+    .rs1_addr_Fhl           (rs1_addr_Fhl),
+    .rd_en1                 (rd_en1),
+    .rs2_addr_Fhl           (rs2_addr_Fhl),
+    .wen_Xhl                (wb_en_Xhl),
+    .wb_access_dir_Xhl      (wb_access_dir_Xhl),
+
+    .rs1_Dhl                (rs1_Dhl),
+    .rs2_Dhl                (rs2_Dhl),
+    .rd_Dhl                 (rd_Dhl),
+    .rs1_Xhl                (rs1_Xhl),
+    .wb_addr_Xhl            (wb_addr_Xhl),
+
+    .v_wb_en_Xhl             (v_wb_en_Xhl),
+    .vm_reg_en_Xhl           (vm_reg_en_Xhl),
+    .masking_en_Xhl          (masking_en_Xhl),
+    .sp_subword_incr_Xhl     (sp_subword_incr_Xhl),
+    .wb_to_addr_Xhl          (wb_to_addr_Xhl),
+    .wb_to_data_Xhl          (wb_to_data_Xhl),
+
+    // ALU Inputs
+    .shamt_reg_en_Xhl        (shamt_reg_en_Xhl),
+    .shamt_mux_sel_Xhl       (shamt_mux_sel_Xhl),
+    .adj_sw_mux_sel_Xhl      (adj_sw_mux_sel_Xhl),
+    .adj_sw_reg_en_Xhl       (adj_sw_reg_en_Xhl),
+    .a_offset_mux_sel_Dhl    (a_offset_mux_sel_Dhl),
+    .a_offset_mux_sel_Xhl    (a_offset_mux_sel_Xhl),
+    .shamt_imm_Xhl           (shamt_imm_Xhl),
+    .shift_inst_dir_Xhl      (shift_inst_dir_Xhl),
+    .a_rd_tmp_Xhl            (a_rd_tmp_Xhl),
+    .a_mux_sel_Xhl           (a_mux_sel_Xhl),
+    .b_imm_Xhl               (b_imm_Xhl),
+    .b_mux_sel_Xhl           (b_mux_sel_Xhl),
+    .a_subword_off_Dhl       (a_subword_off_Dhl),
+    .b_subword_off_Dhl       (b_subword_off_Dhl),
+    .wb_subword_off_Xhl      (wb_subword_off_Xhl),
+    .addsub_fn_Xhl           (addsub_fn_Xhl),
+    .logic_fn_Xhl            (logic_fn_Xhl),
+    .alu_fn_type_Xhl         (alu_fn_type_Xhl),
+    .mul_fn_add_Xhl          (mul_fn_add_Xhl),
+    .mul_fn_shift_Xhl        (mul_fn_shift_Xhl),
+    .mul_inter_wr_off_Xhl   (mul_inter_wr_off_Xhl),
+    .mul_inter_rfwb_off_Xhl (mul_inter_rfwb_off_Xhl),
+    .mul_inter_reg_en_Xhl   (mul_inter_reg_en_Xhl),
+
+    .prop_flag_Xhl           (prop_flag_Xhl),
+    .carry_in_1_Xhl          (carry_in_1_Xhl),
+    .flag_reg_en_Xhl         (flag_reg_en_Xhl),
+
+    .addr_shift_dir_sel_Xhl  (addr_shift_dir_sel_Xhl),
+    .addr_reg_en_Xhl         (addr_reg_en_Xhl),
+
+    .last_uop_Xhl            (last_uop_Xhl),
+    .br_reg_en_Xhl           (br_reg_en_Xhl),
+    .br_type_Xhl             (br_type_Xhl),
+
+    .branch_taken_Xhl        (branch_taken_Xhl),
+    .b_use_imm_reg_Xhl       (b_use_imm_reg_Xhl),
+    .proc2cop_data_Xhl       (proc2cop_data_Xhl),
+
+    .vl_reg_en_Xhl           (vl_reg_en_Xhl),
+    .pc_Fhl                  (pc_Fhl)
+
+  );
+
+endmodule
+
+`endif

@@ -1,0 +1,129 @@
+`ifndef BISCUIT_DESERIALIZED_REG_V
+`define BISCUIT_DESERIALIZED_REG_V
+
+<%
+#import param_Defines as p
+from pyhplib import *
+%>
+
+
+module biscuit_DeserializedSeqLog
+(
+  input clk,
+  input reset,
+<%
+for i in range(BISCUIT_C_N_OFF):
+  print("  input subword_"+str(i)+"_en,")
+print("  input ["+str(BISCUIT_P_NBITS-1)+":0] write_data,")
+%>
+  output reg [31:0] out
+);
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS)+';')
+print('  localparam BISCUIT_C_N_OFF = '+str(BISCUIT_C_N_OFF)+';')
+print('  localparam BISCUIT_C_OFFBITS = '+BISCUIT_C_OFFBITS_STR+';')
+%>
+
+// // Gate Clock
+//   wire bypass_to_vs2 = vrf_wen_Xhl && (vs2 == waddr_Xhl);
+//   wire vs2_word_stored_en = !(reset || bypass_to_vs2 || vrfresp_handshake_Rhl);
+//   wire vs2_word_stored_clk_gated;
+
+//   biscuit_ClkEnBuf vs2_word_stored_clk_gate
+//   (
+//     .clk  (vs2_word_stored_clk_gated),
+//     .rclk (clk),
+//     .en_l (vs2_word_stored_en)
+//   );
+  reg [BISCUIT_P_NBITS-1:0] reg_array[BISCUIT_C_N_OFF-1:0];
+<%
+for i in range(BISCUIT_C_N_OFF):
+  print("// Gate Clock")
+  print("wire subword_"+str(i)+"_gate_en = !(reset || subword_"+str(i)+"_en);")
+  print("wire subword_"+str(i)+"_gate_clk_gated;")
+  print("biscuit_ClkEnBuf vs2_word_stored_clk_gate_"+str(i)+"")
+  print("(")
+  print("  .clk  (subword_"+str(i)+"_gate_clk_gated),")
+  print("  .rclk (clk),")
+  print("  .en_l (subword_"+str(i)+"_gate_en)")
+  print(");")
+
+  print("  // Subword "+str(i)+" Sequential")
+  print("  always @ (posedge subword_"+str(i)+"_gate_clk_gated) begin")
+  print("    reg_array["+str(i)+"] <= reset ? {BISCUIT_P_NBITS{1'b0}} : (subword_"+str(i)+"_en ? write_data : reg_array["+str(i)+"]);")
+  print("  end")
+  print("")
+%>
+
+  // Concatenate register array for convenience later
+  always @(*) begin
+    out = {
+<%
+for i in range(BISCUIT_C_N_OFF-1,0,-1):
+  print("    reg_array["+str(i)+"],")
+print("    reg_array[0]")
+%>    };
+  end
+
+endmodule
+
+module biscuit_DeserializedReg
+(
+  input reset,
+  input clk,
+
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0] subword_en_idx,')
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0] data_in,')
+%>
+  output reg [31:0] out
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS)+';')
+print('  localparam BISCUIT_C_N_OFF = '+str(BISCUIT_C_N_OFF)+';')
+print('  localparam BISCUIT_C_OFFBITS = '+BISCUIT_C_OFFBITS_STR+';')
+%>
+
+
+
+  wire [BISCUIT_P_NBITS-1:0] write_data = reset ? {BISCUIT_P_NBITS{1'b0}} : data_in;
+
+
+// Convert subword enable index to one-hot enable signal
+
+  reg [BISCUIT_C_N_OFF-1:0] subword_off_en;
+
+always @(*) begin
+  subword_off_en = {BISCUIT_C_N_OFF{1'b0}};
+  case (subword_en_idx)
+<%
+for i in range(BISCUIT_C_N_OFF):
+  print('    '+ str(BISCUIT_C_OFFBITS) +'\'d'+str(i)+': subword_off_en['+str(i)+'] = 1\'b1;')
+print('    default: subword_off_en = '+str(BISCUIT_C_N_OFF)+'\'b0;')
+%>
+  endcase
+end
+
+wire[31:0] seq_log_out;
+biscuit_DeserializedSeqLog seq_log
+(
+  .clk (clk),
+  .reset (reset),
+<%
+for i in range(BISCUIT_C_N_OFF):
+  print("  .subword_"+str(i)+"_en (subword_off_en["+str(i)+"]),")
+%>
+  .write_data (write_data),
+  .out (seq_log_out)
+);
+
+
+always @(*) begin
+  out = seq_log_out;
+end
+
+
+endmodule
+
+`endif

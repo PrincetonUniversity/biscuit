@@ -1,0 +1,664 @@
+
+`ifndef BISCUIT_DPATH_V
+`define BISCUIT_DPATH_V
+<%
+from pyhplib import *
+%>
+module biscuit_Dpath
+(
+
+  input                  clk,
+  input                  reset,
+  output                 biscuit_csr_int,
+  input                  biscuit_int,
+  output reg             csr_disable_biscuit,
+
+  output [31:0]          imemreq_msg_addr,
+  output                 imemreq_nc,
+
+  output [31:0]          dmemreq_msg_addr,
+  output [31:0]          dmemreq_msg_data,
+  input  [1:0]           dmemreq_msg_len,
+  output                 dmemreq_nc,
+  input                  memreq_signed, // sign extend response based on this bit from ctrl fir both LB & ExLB
+  input  [31:0]          dmemresp_msg_data,
+  input                  dmemresp_val_Xhl,
+  output                 use_addr_ext,
+  output [7:0]           memreq_addr_ext,
+  output [31:0]          memreq_data_ext,
+
+  // Scratchpad Interface
+  input                  vector_memop_Xhl,
+  input                  spmemreq_rw,
+  output [14:0]          spmemreq_msg_addr, // 15-bit nc local scratchpad address space
+<%
+print('  output [' + str((BISCUIT_P_NLANES * BISCUIT_P_NBITS) - 1) + ':0]         spmemreq_msg_data,')
+print('  output [' + str((BISCUIT_P_NLANES * BISCUIT_P_NBITS) - 1) + ':0]         spmemreq_msg_bw,')
+print('  input  [' + str((BISCUIT_P_NLANES * BISCUIT_P_NBITS) - 1) + ':0]         spmemresp_msg_data,')
+%>
+  input                  sp_handshake_prev,
+
+  // CSRs
+  input                  csr_read_en_Xhl,
+  input                  csr_write_en_Xhl,
+  output                 csr_ext_mem_mode,
+
+  // Maple
+  input                  biscuit_conf,
+  input  [2:0]           biscuit_code,
+  input  [31:0]          conf_data,
+  output reg [31:0]      biscuit_dcp_csr_read_data,
+
+  // ctrl -> dpath
+  input [31:0]           ir_Fhl,
+  input [31:0]           ir_Xhl,
+  input                  new_rfreq_Fhl,
+  input                  accept_new_inst_Dhl,
+  input                  pc_mux_sel_Xhl,
+  input                  pc_plus4_mux_sel_Xhl,
+
+  // Register File Interface
+  input   [4:0]          rega_addr_Dhl,
+  input   [4:0]          regb_addr_Dhl,
+
+  input                  rfreq_val_Fhl,
+  output                 rfreq_rdy_Fhl,
+  output                 rfresp_val_Rhl,
+  input                  rfresp_rdy_Rhl,
+  input                  rd_en0,
+  input  [4:0]           rs1_addr_Fhl,
+  input                  rd_en1,
+  input  [4:0]           rs2_addr_Fhl,
+  input                  wen_Xhl,
+  input                  wb_access_dir_Xhl,
+
+
+  input [4:0]            rs1_Dhl,
+  input [4:0]            rs2_Dhl,
+  input [4:0]            rd_Dhl,
+  input [4:0]            rs1_Xhl,
+  input [4:0]            wb_addr_Xhl,
+
+  input                  v_wb_en_Xhl,
+  input                  vm_reg_en_Xhl,
+  input                  masking_en_Xhl,
+  input                  sp_subword_incr_Xhl,
+  input                  wb_to_addr_Xhl,
+  input                  wb_to_data_Xhl,
+
+  // ALU Inputs
+  input                 shamt_reg_en_Xhl,
+  input                 shamt_mux_sel_Xhl,
+  input                 adj_sw_mux_sel_Xhl,
+  input                 adj_sw_reg_en_Xhl,
+  input                 a_offset_mux_sel_Dhl,
+  input                 a_offset_mux_sel_Xhl,
+  input [4:0]           shamt_imm_Xhl,
+  input                 shift_inst_dir_Xhl,
+  input                 a_rd_tmp_Xhl,
+  input                 a_mux_sel_Xhl,
+<%
+from pyhplib import *
+print('  input ['+str(BISCUIT_P_NBITS-1)+':0]    b_imm_Xhl,')
+%>
+  input                  b_mux_sel_Xhl,
+
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  a_subword_off_Dhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  b_subword_off_Dhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  wb_subword_off_Xhl,')
+%>
+  input                  addsub_fn_Xhl,
+  input [1:0]            logic_fn_Xhl,
+  input [2:0]            alu_fn_type_Xhl,
+  input                  mul_fn_add_Xhl,
+  input                  mul_fn_shift_Xhl,
+<%
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_wr_off_Xhl,')
+print('  input ['+str(BISCUIT_C_OFFBITS-1)+':0]  mul_inter_rfwb_off_Xhl,')
+%>
+  input     [63:0] mul_inter_reg_en_Xhl, // TEMP size, can be optimized
+
+  input                  prop_flag_Xhl,
+  input                  carry_in_1_Xhl,
+  input                  flag_reg_en_Xhl,
+
+  input                  addr_shift_dir_sel_Xhl,
+  input                  addr_reg_en_Xhl,
+
+  input                  last_uop_Xhl,
+  input                  br_reg_en_Xhl,
+  input [2:0]            br_type_Xhl,
+
+  output                 branch_taken_Xhl, // Branch register indicates if branch is taken (1) or not taken (0).
+  output                 b_use_imm_reg_Xhl,
+  output [31:0]          proc2cop_data_Xhl,
+
+  input                  vl_reg_en_Xhl,
+  output [31:0]          pc_Fhl
+
+);
+
+<%
+print('  localparam BISCUIT_P_NBITS = '+str(BISCUIT_P_NBITS) + ';')
+print('  localparam BISCUIT_P_NLANES = '+str(BISCUIT_P_NLANES) + ';')
+print('  localparam BISCUIT_C_OFFBITS = '+str(BISCUIT_C_OFFBITS) + ';')
+print('  localparam BISCUIT_C_LOG_NBITS = '+str(BISCUIT_C_LOG_NBITS) + ';')
+%>
+
+  //----------------
+  // proc2cop logic
+  // ---------------
+  wire [BISCUIT_P_NBITS-1:0] alu_mux_out_Xhl;
+  wire [31:0]        addr_reg_Xhl;
+  // assign proc2cop_data_Xhl = {alu_mux_out_Xhl, addr_reg_Xhl[31-BISCUIT_P_NBITS:0]};
+  assign proc2cop_data_Xhl = dmemreq_msg_data[31:0];
+  // wire b_use_imm_reg_Xhl;
+
+  //---------------
+  // All PC Logic
+  //---------------
+
+  wire [BISCUIT_P_NBITS-1:0] pc_plus4_mux_out_Xhl;
+  wire signed_off_msb_Xhl;
+<%
+if BISCUIT_P_NBITS == 1:
+  print("  wire bitwise_shamt_Xhl; // dummy for bit-serial")
+else:
+  print("  wire [BISCUIT_C_LOG_NBITS-1:0] bitwise_shamt_Xhl;")
+%>
+
+
+  localparam CSR_START_PC_IDX           = 3'b011;
+  reg        csr_biscuit_start;   // Wakes biscuit up when set high. Also forces new pc  in csr_start_pc to be fetched.
+  reg [31:0] csr_start_pc;        // First pc biscuit fetches.
+
+  wire overwrite_pc = biscuit_csr_int || biscuit_int;
+  wire accept_new_inst_Rhl = rfreq_val_Fhl && rfreq_rdy_Fhl;
+  wire [31:0] pc_next_Fhl;
+  biscuit_PCComputation pc_logic
+  (
+    .clk                        (clk),
+    .reset                      (reset),
+    .overwrite_pc               (overwrite_pc),
+    .overwrite_pc_addr          (csr_start_pc),
+    .last_uop_Xhl               (last_uop_Xhl),
+    .new_rfreq_Fhl              (new_rfreq_Fhl),
+    .accept_new_inst_Rhl        (accept_new_inst_Rhl),
+    .accept_new_inst_Dhl        (accept_new_inst_Dhl),
+    .pc_mux_sel_Xhl             (pc_mux_sel_Xhl),
+    .b_use_imm_reg_Xhl          (b_use_imm_reg_Xhl),
+    .alu_mux_out_Xhl            (alu_mux_out_Xhl),
+    .pc_plus4_mux_sel_Xhl       (pc_plus4_mux_sel_Xhl),
+    .a_mux_sel_Xhl              (a_mux_sel_Xhl),
+    .addr_shift_dir_sel_Xhl     (addr_shift_dir_sel_Xhl),
+    .addr_reg_en_Xhl            (addr_reg_en_Xhl),
+    .pc_plus4_mux_out_Xhl       (pc_plus4_mux_out_Xhl),
+    .addr_reg_Xhl               (addr_reg_Xhl),
+    .pc_Fhl                     (pc_Fhl),
+    .pc_next_Fhl                (pc_next_Fhl)
+  );
+
+  // assign imemreq_msg_addr = pc_Fhl;
+  assign imemreq_msg_addr = pc_next_Fhl;
+
+
+  //-------------
+  // Scalar Core
+  //-------------
+   wire scalar_ld_resp_val = (sp_handshake_prev && !vector_memop_Xhl && spmemreq_rw);
+  wire [BISCUIT_P_NBITS-1:0] scalar_ld_resp_data;
+  reg  [31:0] csr_read_data_Xhl;
+  wire [31:0] vl_reg_Xhl;
+  wire [31:0] avl_reg_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] scalar_rf_out_a_Xhl;
+  wire [BISCUIT_P_NBITS-1:0] scalar_rf_out_rs1_Xhl;
+  wire [BISCUIT_C_OFFBITS-1:0] a_subword_idx_Dhl;
+
+  localparam REG_RS1 = 2'b00;
+  localparam REG_RS2 = 2'b01;
+  localparam REG_RD  = 2'b10;
+  localparam REG_R0  = 2'b11;
+
+  wire [1:0] rega_arch_reg_Dhl = (rega_addr_Dhl == 5'b0)    ? REG_R0  :
+                                ((rega_addr_Dhl == rs1_Dhl) ? REG_RS1 :
+                                ((rega_addr_Dhl == rs2_Dhl) ? REG_RS2 :
+                                ((rega_addr_Dhl == rd_Dhl)  ? REG_RD  : REG_R0 )));
+  wire [1:0] regb_arch_reg_Dhl = (regb_addr_Dhl == 5'b0)    ? REG_R0  :
+                                ((regb_addr_Dhl == rs1_Dhl) ? REG_RS1 :
+                                ((regb_addr_Dhl == rs2_Dhl) ? REG_RS2 :
+                                ((regb_addr_Dhl == rd_Dhl)  ? REG_RD  : REG_R0 )));
+
+biscuit_ScalarDpath scalar_core
+(
+  .clk                   (clk),
+  .reset                 (reset),
+
+  // Register File Interface
+
+  .rfreq_val_Fhl         (rfreq_val_Fhl),
+  .rfreq_rdy_Fhl         (rfreq_rdy_Fhl),
+  .rfresp_val_Rhl        (rfresp_val_Rhl),
+  .rfresp_rdy_Rhl        (rfresp_rdy_Rhl),
+  .rd_en0                (rd_en0),
+  .rs1_addr_Fhl          (rs1_addr_Fhl),
+  .rd_en1                (rd_en1),
+  .rs2_addr_Fhl          (rs2_addr_Fhl),
+  .wen_Xhl               (wen_Xhl),
+  .wb_access_dir_Xhl     (wb_access_dir_Xhl),
+  .waddr_Xhl             (wb_addr_Xhl),
+
+  .rs1_Dhl               (rs1_Dhl),
+  .rs2_Dhl               (rs2_Dhl),
+  .rs1_Xhl               (rs1_Xhl),
+  .rega_arch_reg_Dhl     (rega_arch_reg_Dhl),
+  .regb_arch_reg_Dhl     (regb_arch_reg_Dhl),
+
+  .sp_subword_incr_Xhl   (sp_subword_incr_Xhl),
+  .scalar_ld_resp_val    (scalar_ld_resp_val),
+  .scalar_ld_resp_data   (scalar_ld_resp_data),
+  .wb_to_addr_Xhl        (wb_to_addr_Xhl),
+  .wb_to_data_Xhl        (wb_to_data_Xhl),
+  .csr_read_en_Xhl       (csr_read_en_Xhl),
+  .csr_read_data_Xhl     (csr_read_data_Xhl),
+
+  .ir_Fhl                (ir_Fhl),
+  .ir_Xhl                (ir_Xhl),
+
+  .shamt_reg_en_Xhl      (shamt_reg_en_Xhl),
+  .shamt_mux_sel_Xhl     (shamt_mux_sel_Xhl),
+  .adj_sw_mux_sel_Xhl    (adj_sw_mux_sel_Xhl),
+  .adj_sw_reg_en_Xhl     (adj_sw_reg_en_Xhl),
+  .a_offset_mux_sel_Dhl  (a_offset_mux_sel_Dhl),
+  .a_offset_mux_sel_Xhl  (a_offset_mux_sel_Xhl),
+  .shamt_imm_Xhl         (shamt_imm_Xhl),
+  .shift_inst_dir_Xhl    (shift_inst_dir_Xhl),
+  .a_rd_tmp_Xhl          (a_rd_tmp_Xhl),
+
+  .signed_off_msb_Xhl    (signed_off_msb_Xhl),
+  .bitwise_shamt_Xhl     (bitwise_shamt_Xhl),
+
+  .a_mux_sel_Xhl         (a_mux_sel_Xhl),
+  .pc_plus4_mux_out_Xhl  (pc_plus4_mux_out_Xhl),
+  .b_imm_Xhl             (b_imm_Xhl),
+  .b_mux_sel_Xhl         (b_mux_sel_Xhl),
+
+  .a_subword_off_Dhl     (a_subword_off_Dhl),
+  .a_subword_idx_Dhl     (a_subword_idx_Dhl),
+  .b_subword_off_Dhl     (b_subword_off_Dhl),
+  .wb_subword_off_Xhl    (wb_subword_off_Xhl),
+
+  .addsub_fn_Xhl         (addsub_fn_Xhl),
+  .logic_fn_Xhl          (logic_fn_Xhl),
+  .alu_fn_type_Xhl       (alu_fn_type_Xhl),
+
+  .prop_flag_Xhl         (prop_flag_Xhl),
+  .carry_in_1_Xhl        (carry_in_1_Xhl),
+  .last_uop_Xhl          (last_uop_Xhl),
+  .flag_reg_en_Xhl       (flag_reg_en_Xhl),
+  .br_reg_en_Xhl         (br_reg_en_Xhl),
+  .br_type_Xhl           (br_type_Xhl),
+
+
+  .rf_out_rs1_Xhl        (scalar_rf_out_rs1_Xhl),
+
+  .dmemreq_msg_addr_Xhl  (dmemreq_msg_addr),
+  .dmemreq_msg_data_Xhl  (dmemreq_msg_data),
+  .dmemreq_msg_len_Xhl   (dmemreq_msg_len),
+  .dmemreq_signed_Xhl    (memreq_signed),
+  .dmemresp_val_Xhl      (dmemresp_val_Xhl),
+  .dmemresp_msg_data_Xhl (dmemresp_msg_data),
+
+  .b_use_imm_reg_Xhl     (b_use_imm_reg_Xhl),
+  .branch_taken_Xhl      (branch_taken_Xhl),
+  .alu_mux_out_Xhl       (alu_mux_out_Xhl),
+
+  .vl_reg_en_Xhl         (vl_reg_en_Xhl),
+  .avl_reg_Xhl           (avl_reg_Xhl),
+  .vl_reg_Xhl            (vl_reg_Xhl)
+
+);
+
+//------
+// CSRs
+//------
+// Accessible by CSRRW instructions
+reg [31:0] csr_exmem_data_ext;  // Optional 32-bit data extension for wide external memops
+reg [31:0] csr_mem_access_mode; // [31:13]=0, [12]=Extended address, [11:4]=8-bit address extension for exld/exst, [3:0]= {external/scratchpad, 64/32-bit, cacheable/NC imemreq, C/NC dmemreq]
+
+assign dmemreq_nc = csr_mem_access_mode[0];
+assign imemreq_nc = csr_mem_access_mode[1];
+assign csr_ext_mem_mode = csr_mem_access_mode[3];
+assign use_addr_ext = csr_mem_access_mode[12];
+assign memreq_addr_ext = csr_mem_access_mode[11:4];
+assign memreq_data_ext = csr_exmem_data_ext;
+
+// Affect Nibbler Functionality
+
+assign     biscuit_csr_int = csr_biscuit_start;
+
+// Read-only for Monitoring
+reg [31:0] csr_pc;
+reg [31:0] csr_avl;
+reg [31:0] csr_vl;
+
+localparam CSR_EXMEM_DATA_EXT_IDX     = 3'b000;
+localparam CSR_MEM_ACCESS_MODE_IDX    = 3'b001;
+localparam CSR_BISCUIT_START_IDX      = 3'b010;
+// localparam CSR_START_PC_IDX        = 3'b011; // Previously  Declared
+localparam CSR_DISABLE_BISCUIT_IDX    = 3'b100;
+localparam CSR_PC_IDX                 = 3'b101;
+localparam CSR_AVL_IDX                = 3'b110;
+localparam CSR_VL_IDX                 = 3'b111;
+
+always @ (posedge clk) begin
+  if (reset) begin
+    csr_exmem_data_ext <= 32'h8100000c;
+    csr_mem_access_mode<= 32'b0; // Default to regular memory access so you're not stuck in only-interrupt mode.
+    csr_biscuit_start  <= 1'b0;
+    csr_start_pc       <= 32'h40000000;
+    csr_disable_biscuit<= 1'b0;
+    csr_pc             <= 32'b0;
+    csr_avl            <= 32'b0;
+    csr_vl             <= 32'b0;
+  end else begin
+    // Handle csr updates coming from off-tile
+    if (biscuit_conf) begin
+      case(biscuit_code)
+        CSR_EXMEM_DATA_EXT_IDX   : csr_exmem_data_ext  <= conf_data[31:0];
+        CSR_MEM_ACCESS_MODE_IDX  : csr_mem_access_mode <= conf_data[31:0];
+        CSR_BISCUIT_START_IDX    : csr_biscuit_start   <= conf_data[0];
+        CSR_START_PC_IDX         : csr_start_pc        <= conf_data[31:0];
+        CSR_DISABLE_BISCUIT_IDX  : csr_disable_biscuit <= conf_data[0];
+        CSR_PC_IDX               : csr_pc              <= conf_data[31:0];
+        CSR_AVL_IDX              : csr_avl             <= conf_data[31:0];
+        CSR_VL_IDX               : csr_vl              <= conf_data[31:0];
+      endcase
+    // Handle csr updates coming from Nibbler CSRRW instructions
+    // All data comes from the mem_data_reg in the scalar datapath
+    // All addresses come from bits [2:0] of mem_addr_reg in scalar dpath
+    end else if (csr_write_en_Xhl) begin
+      case(dmemreq_msg_addr[2:0])
+        CSR_EXMEM_DATA_EXT_IDX   : csr_exmem_data_ext  <= dmemreq_msg_data[31:0];
+        CSR_MEM_ACCESS_MODE_IDX  : csr_mem_access_mode <= dmemreq_msg_data[31:0];
+        CSR_BISCUIT_START_IDX    : csr_biscuit_start   <= dmemreq_msg_data[0];
+        CSR_START_PC_IDX         : csr_start_pc        <= dmemreq_msg_data[31:0];
+        CSR_DISABLE_BISCUIT_IDX  : csr_disable_biscuit <= dmemreq_msg_data[0];
+        CSR_PC_IDX               : csr_pc              <= dmemreq_msg_data[31:0];
+        CSR_AVL_IDX              : csr_avl             <= dmemreq_msg_data[31:0];
+        CSR_VL_IDX               : csr_vl              <= dmemreq_msg_data[31:0];
+      endcase
+    end else begin
+      csr_exmem_data_ext  <=csr_exmem_data_ext;
+      csr_mem_access_mode <=csr_mem_access_mode;
+      csr_biscuit_start   <= 1'b0; // Turn off start flag after one cycle.
+      csr_start_pc        <=csr_start_pc;
+      csr_disable_biscuit <=csr_disable_biscuit;
+      // Keep the following updated with value in datapath
+      csr_pc              <=pc_Fhl;
+      csr_avl             <=avl_reg_Xhl;
+      csr_vl              <=vl_reg_Xhl;
+    end
+  end
+end
+
+// Output Config Reg of Interest to DCP
+always @(*) begin
+  case(biscuit_code)
+    CSR_EXMEM_DATA_EXT_IDX   : biscuit_dcp_csr_read_data = {32'b0, csr_exmem_data_ext};
+    CSR_MEM_ACCESS_MODE_IDX  : biscuit_dcp_csr_read_data = {32'b0, csr_mem_access_mode};
+    CSR_BISCUIT_START_IDX    : biscuit_dcp_csr_read_data = {63'b0, csr_biscuit_start};
+    CSR_START_PC_IDX         : biscuit_dcp_csr_read_data = {32'b0, csr_start_pc};
+    CSR_DISABLE_BISCUIT_IDX  : biscuit_dcp_csr_read_data = {63'b0, csr_disable_biscuit};
+    CSR_PC_IDX               : biscuit_dcp_csr_read_data = {32'b0, csr_pc};
+    CSR_AVL_IDX              : biscuit_dcp_csr_read_data = {32'b0, csr_avl};
+    CSR_VL_IDX               : biscuit_dcp_csr_read_data = {32'b0, csr_vl};
+    default                  : biscuit_dcp_csr_read_data = {64'b0};
+  endcase
+end
+
+  // Output Config Reg of Interest to Nibbler Scalar Core
+always @(*) begin
+  case(dmemreq_msg_addr[2:0])
+    CSR_EXMEM_DATA_EXT_IDX   : csr_read_data_Xhl = csr_exmem_data_ext;
+    CSR_MEM_ACCESS_MODE_IDX  : csr_read_data_Xhl = csr_mem_access_mode;
+    CSR_BISCUIT_START_IDX    : csr_read_data_Xhl = {31'b0, csr_biscuit_start};
+    CSR_START_PC_IDX         : csr_read_data_Xhl = csr_start_pc;
+    CSR_DISABLE_BISCUIT_IDX  : csr_read_data_Xhl = {31'b0, csr_disable_biscuit};
+    CSR_PC_IDX               : csr_read_data_Xhl = csr_pc;
+    CSR_AVL_IDX              : csr_read_data_Xhl = csr_avl;
+    CSR_VL_IDX               : csr_read_data_Xhl = csr_vl;
+    default                  : csr_read_data_Xhl = {32'b0};
+  endcase
+end
+
+
+//--------------
+// Lane Masking
+//--------------
+<%
+for i in range(BISCUIT_P_NLANES):
+  print('wire [BISCUIT_P_NBITS-1:0] alu_' + str(i) +'_out_Xhl;')
+  print('wire [2*BISCUIT_P_NBITS-1:0] dummy_vs1_holding_Dhl'+str(i)+';')
+  print('wire [BISCUIT_P_NBITS-1:0]   dummy_vs2_holding_Dhl'+str(i)+';')
+%>
+
+// Mask register is 1-bit per lane
+reg [BISCUIT_P_NLANES-1:0] vm_reg_Rhl;
+reg [BISCUIT_P_NLANES-1:0] vl_mask_reg_Rhl;
+always @(posedge clk) begin
+  if (reset) begin
+    vm_reg_Rhl <= {BISCUIT_P_NLANES{1'b1}};
+    vl_mask_reg_Rhl <= {BISCUIT_P_NLANES{1'b1}};
+  end else if (vm_reg_en_Xhl) begin
+  // Vector Mask-Register Logical Instructions when vd == v0
+<%
+for i in range(BISCUIT_P_NLANES):
+  print('vm_reg_Rhl[' + str(i) + '] <= alu_' + str(i) +'_out_Xhl[0];')
+  print('vl_mask_reg_Rhl[' + str(i) + '] <= (vl_reg_Xhl > 32\'d' + str(i) +');')
+%>
+  end
+
+end
+
+// Apply masking (ie. prevent register writeback and memory store) when appropriate
+// If the scratchpad responds from a vector load, write the data to rd when spmemresp_val is high
+wire v_wb_or_v_spmemresp_Xhl = v_wb_en_Xhl || (sp_handshake_prev && vector_memop_Xhl && spmemreq_rw); //rw = 1 for load
+wire [BISCUIT_P_NLANES-1:0] vl_masked_v_wb_en_Xhl =  vl_mask_reg_Rhl & {BISCUIT_P_NLANES{v_wb_or_v_spmemresp_Xhl}};
+wire [BISCUIT_P_NLANES-1:0] masked_v_wb_en_Xhl = masking_en_Xhl ? vm_reg_Rhl & {BISCUIT_P_NLANES{vl_masked_v_wb_en_Xhl}} : {BISCUIT_P_NLANES{vl_masked_v_wb_en_Xhl}};
+
+//-----------
+// Vector RF
+//-----------
+
+
+wire ce_a_Rhl = rega_addr_Dhl != 5'b0; // Active high // TODO: Change these temporary values to distinguisn scalar vs vector RF
+wire ce_b_Rhl = regb_addr_Dhl != 5'b0; // Active high // TODO: Change these temporary values to distinguisn scalar vs vector RF
+wire ce_wb_Xhl = |masked_v_wb_en_Xhl;      // Active high
+wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_din_Xhl;
+wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_out_a_Xhl;
+wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_out_b_Xhl;
+
+// Convert from per-lane signals to per-bit signals
+wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_bw_Xhl;
+<%
+for i in range(BISCUIT_P_NLANES):
+  print('  // Lane '+ str(i) + 'write enable and data')
+  print('  assign vrf_bw_Xhl[' + str(i*BISCUIT_P_NBITS) + '+:BISCUIT_P_NBITS] = {BISCUIT_P_NBITS{masked_v_wb_en_Xhl['+str(i)+']}};')
+  print('  assign vrf_din_Xhl[' + str(i*BISCUIT_P_NBITS) + '+:BISCUIT_P_NBITS] = (vector_memop_Xhl && spmemreq_rw) ? spmemresp_msg_data[' + str(i*BISCUIT_P_NBITS) + '+:BISCUIT_P_NBITS] : alu_' + str(i) + '_out_Xhl;')
+%>
+// biscuit_vector_rf vrf
+// (
+//   .MEMCLK  (clk),
+//   .RESET_N (~reset),
+//   .CEA     (ce_a_Rhl),
+//   .CEB     (ce_b_Rhl),
+//   .CEW     (ce_wb_Xhl),
+//   .AA      ({rega_addr_Dhl, a_subword_idx_Dhl}),
+//   .AB      ({regb_addr_Dhl, b_subword_off_Dhl}),
+//   .AW      ({wb_addr_Xhl, wb_subword_off_Xhl}),
+//   .DIN     (vrf_din_Xhl),
+//   .BW      (vrf_bw_Xhl),
+//   .DOUTA   (vrf_out_a_Xhl),
+//   .DOUTB   (vrf_out_b_Xhl)
+// );
+
+// biscuit_VectorRegfile vrf
+//   (
+//     .clk         (clk),
+//     .raddr0_Rhl  (rega_addr_Dhl),
+//     .roff0_Rhl   (a_subword_idx_Dhl),
+//     .rdata0_Xhl  (vrf_out_a_Xhl),
+//     .raddr1_Rhl  (regb_addr_Dhl),
+//     .roff1_Rhl   (b_subword_off_Dhl),
+//     .rdata1_Xhl  (vrf_out_b_Xhl),
+//     .wen_Xhl     (ce_wb_Xhl),
+//     .waddr_Xhl   (wb_addr_Xhl),
+//     .woffset_Xhl (wb_subword_off_Xhl),
+//     .wdata_Xhl   (vrf_din_Xhl)
+//   );
+
+
+// wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_out_a_0s_Xhl;
+// wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vrf_out_b_0s_Xhl;
+// reg [4:0] rega_addr_Xhl;
+// reg [4:0] regb_addr_Xhl;
+// always @(posedge clk) begin
+//   if (reset) begin
+//     rega_addr_Xhl <= 5'b0;
+//     regb_addr_Xhl <= 5'b0;
+//   end else begin
+//     rega_addr_Xhl <= rega_addr_Dhl;
+//     regb_addr_Xhl <= regb_addr_Dhl;
+//   end
+// end
+
+// assign vrf_out_a_0s_Xhl = (rega_addr_Xhl == 5'b0) ? {(BISCUIT_P_NLANES*BISCUIT_P_NBITS){1'b0}} : vrf_out_a_Xhl;
+// assign vrf_out_b_0s_Xhl = (regb_addr_Xhl == 5'b0) ? {(BISCUIT_P_NLANES*BISCUIT_P_NBITS){1'b0}} : vrf_out_b_Xhl;
+
+// If it's a VX instruction, replace input B (vs1) with the value in rs1
+wire v_use_scalar_rs1_Fhl = ((ir_Fhl[6:0]==7'b1010111) && (ir_Fhl[14:12]==3'b100));
+wire v_use_vector_imm_Fhl = ((ir_Fhl[6:0]==7'b1010111) && (ir_Fhl[14:12]==3'b011));
+wire vector_rd_en0 = rd_en0 && (!v_use_scalar_rs1_Fhl) && (!v_use_vector_imm_Fhl); // Dont activate vs1 on .vi instructions!
+wire v_use_scalar_rs1_Xhl = ((ir_Xhl[6:0]==7'b1010111) && (ir_Xhl[14:12]==3'b100));
+// wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] vs1_rs1_mux_out_Xhl =  v_use_scalar_rs1_Xhl ? {BISCUIT_P_NLANES{scalar_rf_out_rs1_Xhl}} : vrf_out_b_0s_Xhl;
+// In this case, use this value as input B...
+
+//--------------
+// Vector Lanes
+//--------------
+
+//TODO: Temporary hack!
+// Pipeline these signals to SIMD lane so pipelining is in just one location, not each lane.
+reg [4:0]                   rega_arch_reg_Xhl;
+reg [4:0]                   regb_arch_reg_Xhl;
+reg [BISCUIT_C_OFFBITS-1:0] a_subword_idx_Xhl;
+reg [BISCUIT_C_OFFBITS-1:0] b_subword_off_Xhl;
+
+always @(posedge clk) begin
+  rega_arch_reg_Xhl <= rega_arch_reg_Dhl;
+  regb_arch_reg_Xhl <= regb_arch_reg_Dhl;
+  a_subword_idx_Xhl <= a_subword_idx_Dhl;
+  b_subword_off_Xhl <= b_subword_off_Dhl;
+end
+
+
+
+<%
+for i in range(BISCUIT_P_NLANES):
+  print('''
+  biscuit_SIMDLaneDpath lane_''' + str(i) + '''
+  (
+    .clk                   (clk),
+    .reset                 (reset),
+    //.vrf_out_a_Xhl         (   vrf_out_a_0s_Xhl[''' + str((i+1)*BISCUIT_P_NBITS - 1) + ':' + str(i*BISCUIT_P_NBITS) + ''']),
+    //.vrf_out_b_Xhl         (vs1_rs1_mux_out_Xhl[''' + str((i+1)*BISCUIT_P_NBITS - 1) + ':' + str(i*BISCUIT_P_NBITS) + ''']),
+
+    .vrfreq_val_Fhl        (rfreq_val_Fhl),
+    // .vrfreq_rdy_Fhl        (vrfreq_rdy_Fhl),  //out
+    // .vrfresp_val_Rhl       (vrfresp_val_Rhl), //out
+    .vrfresp_rdy_Rhl       (rfresp_rdy_Rhl),
+    .rd_en0                (vector_rd_en0),
+    .vs1_addr_Fhl          (rs1_addr_Fhl),  // vs1 and rs1 are the same
+    .rd_en1                (rd_en1),
+    .vs2_addr_Fhl          (rs2_addr_Fhl),  // vs1 and rs1 are the same
+    .vrf_wen_Xhl           (v_wb_en_Xhl),  // TODO: Does not include masking
+    .waddr_Xhl             (wb_addr_Xhl),
+    .wb_subword_off_Xhl    (wb_subword_off_Xhl),
+    .wb_access_dir_Xhl     (wb_access_dir_Xhl),
+    // .vrf_wdata_Xhl         (vrf_wdata_Xhl),
+
+    .vs1_Dhl               (rs1_Dhl),
+    .vs2_Dhl               (rs2_Dhl),
+
+
+    .rega_addr_Dhl         (rega_addr_Dhl),
+    .regb_addr_Dhl         (regb_addr_Dhl),
+    .rega_arch_reg_Xhl     (rega_arch_reg_Dhl),
+    .regb_arch_reg_Xhl     (regb_arch_reg_Dhl),
+    .a_subword_idx_Dhl     (a_subword_idx_Dhl),
+    .b_subword_off_Dhl     (b_subword_off_Dhl),
+
+
+    .v_use_scalar_rs1_Xhl  (v_use_scalar_rs1_Xhl),
+    .scalar_rf_out_rs1_Xhl (scalar_rf_out_rs1_Xhl),
+
+    .shift_inst_dir_Xhl    (shift_inst_dir_Xhl),
+    .signed_off_msb_Xhl    (signed_off_msb_Xhl),
+    .a_offset_mux_sel_Xhl  (a_offset_mux_sel_Xhl),
+    .bitwise_shamt_Xhl     (bitwise_shamt_Xhl),
+    .adj_sw_mux_sel_Xhl    (adj_sw_mux_sel_Xhl),
+    .adj_sw_reg_en_Xhl     (adj_sw_reg_en_Xhl),
+
+    .b_imm_Xhl             (b_imm_Xhl),
+    .b_mux_sel_Xhl         (b_mux_sel_Xhl),
+
+    .addsub_fn_Xhl         (addsub_fn_Xhl),
+    .logic_fn_Xhl          (logic_fn_Xhl),
+    .alu_fn_type_Xhl       (alu_fn_type_Xhl),
+
+    .prop_flag_Xhl         (prop_flag_Xhl),
+    .carry_in_1_Xhl        (carry_in_1_Xhl),
+    .flag_reg_en_Xhl       (flag_reg_en_Xhl),
+
+    .mul_fn_add_Xhl        (mul_fn_add_Xhl),
+    .mul_fn_shift_Xhl      (mul_fn_shift_Xhl),
+
+    .mul_inter_wr_off_Xhl   (mul_inter_wr_off_Xhl),
+    .mul_inter_rfwb_off_Xhl (mul_inter_rfwb_off_Xhl),
+    .mul_inter_reg_en_Xhl   (mul_inter_reg_en_Xhl),
+    .last_uop_Xhl           (last_uop_Xhl),
+
+    .dummy_vs1_holding_Dhl  (dummy_vs1_holding_Dhl'''+str(i)+'''),
+    .dummy_vs2_holding_Dhl  (dummy_vs2_holding_Dhl'''+str(i)+'''),
+    .alu_mux_out_Xhl       (alu_'''+str(i)+'''_out_Xhl)
+    );''')
+%>
+
+//----------------------
+// Scratchpad Interface
+//----------------------
+
+  assign spmemreq_msg_addr = dmemreq_msg_addr[14:0]; // 32 kB Scratchpad. Wrap addresses.
+
+  wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] spmemreq_msg_data_scalar = {BISCUIT_P_NLANES{alu_mux_out_Xhl}};
+  wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] spmemreq_msg_data_vector = vrf_din_Xhl;
+  assign spmemreq_msg_data = vector_memop_Xhl ? spmemreq_msg_data_vector : spmemreq_msg_data_scalar;
+
+  wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] spmemreq_msg_bw_scalar;
+  wire [(BISCUIT_P_NLANES*BISCUIT_P_NBITS)-1:0] spmemreq_msg_bw_vector;
+  // Form mask based on  address. Microcode performs 4 8-bit accesses.
+  wire [8:0] sp_line_offset = {spmemreq_msg_addr[5:0],3'b000}; // TODO: Genericize
+  assign spmemreq_msg_bw_scalar = {{(BISCUIT_P_NLANES-1)*BISCUIT_P_NBITS{1'b0}}, {BISCUIT_P_NBITS{1'b1}}} << sp_line_offset;
+  // Mask address for vector is all masked lanes active.
+  wire [BISCUIT_P_NLANES-1:0] masked_sp_wb_vector = vl_mask_reg_Rhl; //masking_en_Xhl ? vm_reg_Rhl : {BISCUIT_P_NLANES{1'b1}};
+<%
+for i in range(BISCUIT_P_NLANES):
+  print('  assign spmemreq_msg_bw_vector ['+str((i+1)*BISCUIT_P_NBITS - 1) + ':' + str(i*BISCUIT_P_NBITS) + '] = {BISCUIT_P_NBITS{masked_sp_wb_vector['+str(i)+']}};')
+%>
+  assign spmemreq_msg_bw = vector_memop_Xhl ? spmemreq_msg_bw_vector : spmemreq_msg_bw_scalar;
+
+  assign scalar_ld_resp_data = spmemresp_msg_data[sp_line_offset+:BISCUIT_P_NBITS];
+
+endmodule
+`endif
